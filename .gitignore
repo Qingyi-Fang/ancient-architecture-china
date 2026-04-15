@@ -1,0 +1,26 @@
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 数据文件（太大，单独处理）
+data/raw/CulRelPro_China_1961-2019.xls
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
