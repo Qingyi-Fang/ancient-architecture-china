@@ -28,6 +28,7 @@ st.set_page_config(
     page_title="中国古建筑·数字图谱",
     page_icon="🏛️",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 
@@ -72,14 +73,422 @@ def get_main_category(df: pd.DataFrame) -> str:
     return str(category_series.value_counts().idxmax())
 
 
-def build_sidebar(df: pd.DataFrame) -> tuple[str, str]:
-    """构建侧边栏并返回视图和省份筛选值。"""
-    st.sidebar.title("🏛️ 中国古建筑·数字图谱")
+def reset_province_filter() -> None:
+    """重置省份筛选到默认值。"""
+    st.session_state["province_filter"] = "全部"
+
+
+def build_sidebar(df: pd.DataFrame) -> tuple[str, str, str]:
+    """构建侧边栏并返回视图、省份和搜索关键词。"""
+    # 注入高级新中式极简样式，仅作用于侧边栏与控件
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;600;700&display=swap');
+
+        /* 主内容区紧凑化：减少首屏空白，提升展示完整度 */
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 1rem !important;
+            padding-bottom: 0.6rem !important;
+        }
+
+        /* 隐藏 Streamlit 顶部工具栏（Deploy 与右上菜单） */
+        header[data-testid="stHeader"] {
+            display: none !important;
+            height: 0 !important;
+        }
+
+        [data-testid="stAppViewContainer"] .main {
+            padding-bottom: 0 !important;
+            margin-top: 0 !important;
+        }
+
+        footer {
+            visibility: hidden;
+            height: 0;
+        }
+
+        section[data-testid="stSidebar"] {
+            background-color: #7A3D17;
+            min-width: 280px;
+            max-width: 280px;
+            overflow-y: hidden !important;
+            padding-top: 0 !important;
+            margin-top: 0 !important;
+            --primary-color: #5F7F72 !important;
+        }
+
+        /* 清除侧边栏顶部保留头部占位（造成标题上方空白） */
+        section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] {
+            display: none !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+
+        /* 侧边栏固定显示：隐藏收缩按钮并禁用收缩位移 */
+        [data-testid="stSidebarCollapseButton"] {
+            display: none !important;
+        }
+
+        section[data-testid="stSidebar"][aria-expanded="false"] {
+            margin-left: 0 !important;
+        }
+
+        section[data-testid="stSidebar"] > div {
+            padding: 0.22rem 1rem 1.25rem 1rem;
+            height: 100vh;
+            overflow-y: hidden !important;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            margin-top: 0 !important;
+        }
+
+        section[data-testid="stSidebar"] .stSidebarContent,
+        section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+            padding-top: 0 !important;
+            margin-top: 0 !important;
+        }
+
+        section[data-testid="stSidebar"] * {
+            font-family: "Noto Serif SC", "SimSun", serif !important;
+            color: #F5F0E6;
+        }
+
+        /* 修复 Streamlit 内置图标字体被覆盖导致的乱码文本（如 keyboard_double_*） */
+        section[data-testid="stSidebar"] .material-symbols-rounded,
+        section[data-testid="stSidebar"] .material-icons,
+        section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] span {
+            font-family: "Material Symbols Rounded", "Material Icons" !important;
+            font-weight: normal !important;
+            font-style: normal !important;
+        }
+
+        section[data-testid="stSidebar"] .sidebar-title {
+            font-family: "ZCOOL XiaoWei", "Noto Serif SC", "SimSun", serif !important;
+            font-size: 2rem;
+            font-weight: 600;
+            text-align: center;
+            letter-spacing: 0.02em;
+            line-height: 1.42;
+            margin: -0.08rem 0 0.55rem 0;
+            color: #F5F0E6;
+            white-space: normal;
+            word-break: keep-all;
+        }
+
+        section[data-testid="stSidebar"] .sidebar-module-title {
+            font-family: "ZCOOL XiaoWei", "Noto Serif SC", "SimSun", serif !important;
+            font-size: 1.08rem;
+            font-weight: 700;
+            text-align: center;
+            margin: 0.8rem 0 0.55rem 0;
+            color: #F5F0E6;
+        }
+
+        section[data-testid="stSidebar"] .stRadio {
+            border: 1px solid rgba(232, 224, 213, 0.62);
+            border-radius: 18px;
+            padding: 3.25rem 0.78rem 1rem 0.78rem;
+            margin: 0.4rem 0 1rem 0;
+            background: rgba(250, 240, 230, 0.07);
+            position: relative;
+        }
+
+        section[data-testid="stSidebar"] .stRadio::before {
+            content: "选择视图";
+            position: absolute;
+            top: 0.76rem;
+            left: 50%;
+            transform: translateX(-50%);
+            font-family: "ZCOOL XiaoWei", "Noto Serif SC", "SimSun", serif !important;
+            font-size: 1.12rem;
+            font-weight: 700;
+            color: #F5F0E6;
+            white-space: nowrap;
+        }
+
+        section[data-testid="stSidebar"] [data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] input {
+            background-color: #FAF0E6 !important;
+            border: 1px solid rgba(226, 214, 200, 0.92) !important;
+            border-radius: 8px !important;
+            color: #4C2A17 !important;
+            box-shadow: none !important;
+        }
+
+        section[data-testid="stSidebar"] [data-baseweb="select"] * {
+            color: #4C2A17 !important;
+        }
+
+        section[data-testid="stSidebar"] [data-baseweb="select"] > div:hover,
+        section[data-testid="stSidebar"] input:hover {
+            border-color: rgba(232, 224, 213, 1) !important;
+        }
+
+        section[data-testid="stSidebar"] [data-baseweb="select"] > div:focus-within,
+        section[data-testid="stSidebar"] input:focus {
+            border-color: #5F7F72 !important;
+            outline: none !important;
+            box-shadow: 0 0 0 1px rgba(95, 127, 114, 0.45) inset !important;
+        }
+
+        div[data-baseweb="popover"] * {
+            background-color: #FFFFFF !important;
+            color: #4C2A17 !important;
+        }
+
+        /* 下拉弹层输入框：去英文占位突兀感 + 统一光标/聚焦色 */
+        div[data-baseweb="popover"] input::placeholder {
+            color: transparent !important;
+        }
+
+        div[data-baseweb="popover"] input {
+            caret-color: #5F7F72 !important;
+            border-color: rgba(226, 214, 200, 0.92) !important;
+            box-shadow: none !important;
+        }
+
+        div[data-baseweb="popover"] input:focus {
+            border-color: #5F7F72 !important;
+            box-shadow: 0 0 0 1px rgba(95, 127, 114, 0.45) !important;
+        }
+
+        section[data-testid="stSidebar"] [role="option"]:hover {
+            background-color: #F5D6D9 !important;
+            color: #4C2A17 !important;
+        }
+
+        section[data-testid="stSidebar"] input::placeholder {
+            color: #B0A294 !important;
+            font-family: "Noto Serif SC", "SimSun", serif !important;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+            border: 1px solid rgba(232, 224, 213, 0.8);
+            border-radius: 18px;
+            padding: 0.46rem 0.48rem;
+            margin: 0 !important;
+            background: rgba(250, 240, 230, 0.05);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            width: 100%;
+            transition: all 0.15s ease-in-out;
+            min-height: 68px;
+            box-shadow: inset 0 0 0 1px rgba(245, 240, 230, 0.08);
+            box-sizing: border-box;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.56rem;
+            align-items: stretch;
+            width: 100%;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label p {
+            font-family: "ZCOOL XiaoWei", "Noto Serif SC", "SimSun", serif !important;
+            font-size: 0.96rem;
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+            line-height: 1.2;
+            font-weight: 600;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: rgba(250, 240, 230, 0.1);
+            border-color: rgba(245, 240, 230, 0.95);
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+            background: linear-gradient(
+                180deg,
+                rgba(250, 240, 230, 0.24) 0%,
+                rgba(250, 240, 230, 0.14) 100%
+            );
+            border-color: #F5F0E6;
+            box-shadow: inset 0 0 0 1px rgba(245, 240, 230, 0.35);
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p {
+            color: #F5F0E6 !important;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        }
+
+        /* 隐藏单选控件自身可视圆点，仅保留按钮选中样式 */
+        section[data-testid="stSidebar"] [role="radiogroup"] label input[type="radio"] {
+            display: none !important;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label > div:first-child,
+        section[data-testid="stSidebar"] [role="radiogroup"] label [data-baseweb="radio"] {
+            display: none !important;
+            width: 0 !important;
+            min-width: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+
+        /* 清理 radio 的隐藏 label，避免出现顶部重叠小字 */
+        section[data-testid="stSidebar"] .stRadio > label {
+            display: none !important;
+        }
+
+        section[data-testid="stSidebar"] .sidebar-sep {
+            display: none;
+        }
+
+        /* 省份筛选/搜索功能：稳定简洁的模块标题样式 */
+        section[data-testid="stSidebar"] .sidebar-field-title {
+            font-family: "ZCOOL XiaoWei", "Noto Serif SC", "SimSun", serif !important;
+            font-size: 1.12rem;
+            font-weight: 700;
+            text-align: center;
+            color: #F5F0E6;
+            margin: 0.3rem 0 0.55rem 0;
+            letter-spacing: 0.02em;
+        }
+
+        /* 省份筛选/搜索控件：更克制的比赛风输入区 */
+        section[data-testid="stSidebar"] .stSelectbox,
+        section[data-testid="stSidebar"] .stTextInput {
+            margin-bottom: 0.72rem;
+            padding: 0.42rem 0.46rem 0.22rem 0.46rem;
+            border: 1px solid rgba(232, 224, 213, 0.4);
+            border-radius: 14px;
+            background: rgba(250, 240, 230, 0.03);
+        }
+
+        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] .stTextInput input {
+            border: 1px solid rgba(226, 214, 200, 0.92) !important;
+            border-radius: 10px !important;
+            min-height: 42px !important;
+            font-size: 0.95rem !important;
+            color: #4C2A17 !important;
+            box-shadow: none !important;
+        }
+
+        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div {
+            background: rgba(250, 240, 230, 0.78) !important;
+        }
+
+        section[data-testid="stSidebar"] .stTextInput input {
+            background: rgba(250, 240, 230, 0.76) !important;
+        }
+
+        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div:hover,
+        section[data-testid="stSidebar"] .stTextInput input:hover {
+            border-color: rgba(232, 224, 213, 1) !important;
+        }
+
+        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div:focus-within,
+        section[data-testid="stSidebar"] .stTextInput input:focus {
+            border-color: #5F7F72 !important;
+            box-shadow: 0 0 0 1px rgba(95, 127, 114, 0.45) !important;
+        }
+
+        section[data-testid="stSidebar"] .stTextInput input {
+            caret-color: #5F7F72 !important;
+        }
+
+        /* 搜索框最终覆盖：彻底去除红色边框残留 */
+        section[data-testid="stSidebar"] .stTextInput div[data-baseweb="input"] > div {
+            border: 1px solid rgba(226, 214, 200, 0.92) !important;
+            border-radius: 10px !important;
+            box-shadow: none !important;
+        }
+
+        section[data-testid="stSidebar"] .stTextInput div[data-baseweb="input"] > div:hover {
+            border-color: rgba(232, 224, 213, 1) !important;
+        }
+
+        section[data-testid="stSidebar"] .stTextInput div[data-baseweb="input"] > div:focus-within {
+            border-color: #5F7F72 !important;
+            box-shadow: 0 0 0 1px rgba(95, 127, 114, 0.45) !important;
+        }
+
+        section[data-testid="stSidebar"] .stTextInput input:focus,
+        section[data-testid="stSidebar"] .stTextInput input:focus-visible,
+        section[data-testid="stSidebar"] .stSelectbox input:focus,
+        section[data-testid="stSidebar"] .stSelectbox input:focus-visible {
+            outline: none !important;
+            border-color: #5F7F72 !important;
+            box-shadow: none !important;
+            caret-color: #5F7F72 !important;
+        }
+
+        section[data-testid="stSidebar"] .sidebar-footer {
+            margin-top: auto;
+            padding-top: 0.5rem;
+            border-top: 1px solid #E8E0D5;
+            font-size: 0.78rem;
+            color: #F5F0E6;
+            line-height: 1.5;
+            text-align: center;
+            font-weight: 300;
+            background-color: #7A3D17;
+            padding-bottom: 0.2rem;
+            position: static;
+        }
+
+        section[data-testid="stSidebar"] .stTextInput,
+        section[data-testid="stSidebar"] .stSelectbox,
+        section[data-testid="stSidebar"] .stRadio {
+            width: 100%;
+        }
+
+        /* 省份重置按钮：与下拉拼接成同一体 */
+        section[data-testid="stSidebar"] .stButton > button {
+            min-height: 42px !important;
+            height: 42px !important;
+            border-radius: 0 10px 10px 0 !important;
+            border: 1px solid rgba(226, 214, 200, 0.92) !important;
+            border-left: none !important;
+            background: rgba(250, 240, 230, 0.78) !important;
+            color: #6B4B35 !important;
+            font-size: 0.95rem !important;
+            padding: 0 !important;
+            margin-left: -0.48rem !important;
+            box-shadow: none !important;
+        }
+
+        section[data-testid="stSidebar"] .stButton > button:hover {
+            border-color: rgba(232, 224, 213, 1) !important;
+            background: rgba(250, 240, 230, 0.84) !important;
+        }
+
+        section[data-testid="stSidebar"] .stButton > button:focus,
+        section[data-testid="stSidebar"] .stButton > button:focus-visible {
+            outline: none !important;
+            box-shadow: 0 0 0 1px rgba(95, 127, 114, 0.45) !important;
+            border-color: #5F7F72 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 模块一：项目主标题（纯文字）
+    st.sidebar.markdown('<div class="sidebar-title">中国古建筑<br>数字图谱</div>', unsafe_allow_html=True)
+
+    # 模块二：视图切换（卡片内标题样式）
     view = st.sidebar.radio(
         "选择视图",
-        ["📊 总览仪表板", "🗺️ 地图探索"],
+        ["总览仪表板", "地图探索"],
         index=0,
+        label_visibility="collapsed",
     )
+
+    # 模块三：省份筛选（稳定布局，保留原有逻辑）
+    st.sidebar.markdown('<hr class="sidebar-sep" />', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="sidebar-field-title">省份筛选</div>', unsafe_allow_html=True)
 
     province_col = "省级政区名称（中文）"
     if province_col in df.columns:
@@ -93,16 +502,44 @@ def build_sidebar(df: pd.DataFrame) -> tuple[str, str]:
     else:
         provinces = []
 
-    selected_province = st.sidebar.selectbox(
-        "省份筛选",
-        ["全部"] + provinces,
-        index=0,
+    # 省份筛选状态：初始化为“全部”
+    if "province_filter" not in st.session_state:
+        st.session_state["province_filter"] = "全部"
+
+    # 省份筛选 + 右侧紧凑重置
+    province_select_col, province_reset_col = st.sidebar.columns([9, 2], gap="small")
+    with province_select_col:
+        selected_province = st.selectbox(
+            "省份筛选",
+            ["全部"] + provinces,
+            index=0,
+            label_visibility="collapsed",
+            key="province_filter",
+        )
+    with province_reset_col:
+        st.markdown("<div style='height:3px'></div>", unsafe_allow_html=True)
+        st.button("重置", use_container_width=True, on_click=reset_province_filter, help="重置省份")
+
+    # 模块四：名称搜索（稳定布局 + 实时过滤）
+    st.sidebar.markdown('<hr class="sidebar-sep" />', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="sidebar-field-title">搜索功能</div>', unsafe_allow_html=True)
+    search_keyword = st.sidebar.text_input(
+        "搜索功能",
+        value="",
+        placeholder="搜索古建筑名称",
+        label_visibility="collapsed",
     )
 
-    st.sidebar.markdown("---")
-    st.sidebar.caption("数据来源：全国重点文物保护单位公开数据")
-    st.sidebar.caption("赛事信息：古建筑保护与数字化设计相关赛题")
-    return view, selected_province
+    # 底部信息区（固定两行说明）
+    st.sidebar.markdown(
+        """
+        <div class="sidebar-footer">
+            数据来源:全国重点文物保护单位公开数据
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    return view, selected_province, search_keyword
 
 
 def apply_province_filter(df: pd.DataFrame, selected_province: str) -> pd.DataFrame:
@@ -111,6 +548,17 @@ def apply_province_filter(df: pd.DataFrame, selected_province: str) -> pd.DataFr
     if selected_province == "全部" or province_col not in df.columns:
         return df.copy()
     return df[df[province_col] == selected_province].copy()
+
+
+def apply_name_search_filter(df: pd.DataFrame, keyword: str) -> pd.DataFrame:
+    """按古建筑名称进行模糊搜索筛选。"""
+    name_col = "单位名称（中文）"
+    normalized_keyword = keyword.strip()
+    if not normalized_keyword or name_col not in df.columns:
+        return df.copy()
+
+    matched = df[name_col].fillna("").astype(str).str.contains(normalized_keyword, regex=False, na=False)
+    return df[matched].copy()
 
 
 def render_dashboard(filtered_df: pd.DataFrame) -> None:
@@ -154,7 +602,7 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
 
 def render_map_view(filtered_df: pd.DataFrame, selected_province: str) -> None:
     """渲染地图探索视图。"""
-    st.title("🗺️ 地图探索")
+    st.title("地图探索")
     st.caption("在地图中查看古建筑空间分布，可结合省份筛选进行探索。")
 
     st.info(f"当前筛选古建筑数量：{len(filtered_df)} 条")
@@ -170,10 +618,11 @@ def render_map_view(filtered_df: pd.DataFrame, selected_province: str) -> None:
 def main() -> None:
     """应用主函数。"""
     df = load_app_data()
-    view, selected_province = build_sidebar(df)
+    view, selected_province, search_keyword = build_sidebar(df)
     filtered_df = apply_province_filter(df, selected_province)
+    filtered_df = apply_name_search_filter(filtered_df, search_keyword)
 
-    if view == "📊 总览仪表板":
+    if view == "总览仪表板":
         render_dashboard(filtered_df)
     else:
         render_map_view(filtered_df, selected_province)
