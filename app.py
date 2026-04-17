@@ -1367,7 +1367,17 @@ def render_name_word_cloud(df: pd.DataFrame) -> None:
         from wordcloud import WordCloud  # type: ignore
         import matplotlib.font_manager as fm  # type: ignore
 
-        # 优先检查常见中文字体路径（Windows/macOS/Linux）
+        # 先尝试项目内置字体（适配 Streamlit Cloud）
+        project_dir = Path(__file__).resolve().parent
+        bundled_font_candidates = [
+            project_dir / "fonts" / "SimHei.ttf",
+            project_dir / "fonts" / "simhei.ttf",
+            project_dir / "fonts" / "SourceHanSansSC-Regular.otf",
+            project_dir / "fonts" / "SourceHanSansCN-Regular.otf",
+        ]
+        bundled_font = next((str(p) for p in bundled_font_candidates if p.exists()), None)
+
+        # 再检查常见系统中文字体路径（Windows/macOS/Linux）
         font_candidates = [
             "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/simhei.ttf",
@@ -1396,9 +1406,9 @@ def render_name_word_cloud(df: pd.DataFrame) -> None:
                     return fpath
             return None
 
-        font_path = detect_chinese_font()
+        font_path = bundled_font if bundled_font else detect_chinese_font()
         if font_path is None:
-            raise RuntimeError("未找到可用中文字体，请安装思源黑体或微软雅黑。")
+            raise RuntimeError("未找到可用中文字体。请在项目根目录的 fonts 文件夹放入 SimHei.ttf 或 SourceHanSansSC-Regular.otf。")
 
         mask = build_wordcloud_mask(shape="tower", width=2600, height=1200)
 
