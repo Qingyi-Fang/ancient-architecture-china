@@ -1353,6 +1353,28 @@ def build_name_word_frequencies(df: pd.DataFrame, top_n: int = 120) -> dict[str,
     return dict(token_counter.most_common(top_n))
 
 
+def get_font_path() -> Optional[str]:
+    """自动下载并返回中文字体路径；下载失败则返回 None（词云使用默认字体，中文可能乱码）。"""
+    font_dir = Path(__file__).resolve().parent / "fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    font_path = font_dir / "SourceHanSansSC-Regular.otf"
+
+    if font_path.exists():
+        return str(font_path)
+
+    url = (
+        "https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/"
+        "SourceHanSansSC-Regular.otf"
+    )
+    try:
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        font_path.write_bytes(response.content)
+        return str(font_path)
+    except Exception:
+        return None
+
+
 def render_name_word_cloud(df: pd.DataFrame) -> None:
     """渲染建筑名称词云。"""
     frequencies = build_name_word_frequencies(df, top_n=120)
@@ -1365,97 +1387,38 @@ def render_name_word_cloud(df: pd.DataFrame) -> None:
 
     try:
         from wordcloud import WordCloud  # type: ignore
-        import matplotlib.font_manager as fm  # type: ignore
 
-        # 先尝试项目内置字体（适配 Streamlit Cloud）
-        project_dir = Path(__file__).resolve().parent
-        bundled_font_candidates = [
-            project_dir / "fonts" / "SimHei.ttf",
-            project_dir / "fonts" / "simhei.ttf",
-            project_dir / "fonts" / "SourceHanSansSC-Regular.otf",
-            project_dir / "fonts" / "SourceHanSansCN-Regular.otf",
-        ]
-        bundled_font = next((str(p) for p in bundled_font_candidates if p.exists()), None)
+        font_path = get_font_path()
 
-        # 再检查常见系统中文字体路径（Windows/macOS/Linux）
-        font_candidates = [
-            "C:/Windows/Fonts/msyh.ttc",
-            "C:/Windows/Fonts/simhei.ttf",
-            "C:/Windows/Fonts/simsun.ttc",
-            "C:/Windows/Fonts/msyhbd.ttc",
-            "/System/Library/Fonts/PingFang.ttc",
-            "/System/Library/Fonts/Hiragino Sans GB.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        ]
-
-        def detect_chinese_font() -> Optional[str]:
-            direct = next((p for p in font_candidates if Path(p).exists()), None)
-            if direct:
-                return direct
-
-            # 再从系统字体中按关键词检索
-            chinese_keywords = [
-                "noto", "cjk", "wqy", "simhei", "simsun", "msyh",
-                "pingfang", "heiti", "hans", "song", "kai",
-            ]
-            for fpath in fm.findSystemFonts(fontext="ttf") + fm.findSystemFonts(fontext="ttc"):
-                low = fpath.lower()
-                if any(k in low for k in chinese_keywords):
-                    return fpath
-            return None
-
-        font_path = bundled_font if bundled_font else detect_chinese_font()
-        if font_path is None:
-            raise RuntimeError("未找到可用中文字体。请在项目根目录的 fonts 文件夹放入 SimHei.ttf 或 SourceHanSansSC-Regular.otf。")
+        base_wc_kwargs: dict[str, object] = {
+            "width": 2600,
+            "height": 1200,
+            "max_words": 260,
+            "background_color": "#FFFFFF",
+            "mode": "RGB",
+            "color_func": ancient_theme_color_func,
+            "prefer_horizontal": 0.82,
+            "random_state": 42,
+            "margin": 1,
+            "contour_width": 0,
+            "scale": 3,
+            "min_font_size": 8,
+            "max_font_size": 220,
+            "collocations": False,
+            "repeat": False,
+        }
+        if font_path:
+            base_wc_kwargs["font_path"] = font_path
 
         mask = build_wordcloud_mask(shape="tower", width=2600, height=1200)
 
-        wc = WordCloud(
-            font_path=font_path,
-            width=2600,
-            height=1200,
-            max_words=260,
-            background_color="#FFFFFF",
-            mode="RGB",
-            color_func=ancient_theme_color_func,
-            prefer_horizontal=0.82,
-            random_state=42,
-            margin=1,
-            mask=mask,
-            contour_width=0,
-            scale=3,
-            min_font_size=8,
-            max_font_size=220,
-            collocations=False,
-            repeat=False,
-            relative_scaling=0.32,
-        )
+        wc = WordCloud(mask=mask, relative_scaling=0.32, **base_wc_kwargs)
         try:
             wc.generate_from_frequencies(frequencies)
         except Exception:
             # 兜底：塔型失败时回退到简化桥形，保证可见
             fallback_mask = build_wordcloud_mask(shape="river_bridge", width=2600, height=1200)
-            wc = WordCloud(
-                font_path=font_path,
-                width=2600,
-                height=1200,
-                max_words=260,
-                background_color="#FFFFFF",
-                mode="RGB",
-                color_func=ancient_theme_color_func,
-                prefer_horizontal=0.82,
-                random_state=42,
-                margin=1,
-                mask=fallback_mask,
-                contour_width=0,
-                scale=3,
-                min_font_size=8,
-                max_font_size=220,
-                collocations=False,
-                repeat=False,
-            )
+            wc = WordCloud(mask=fallback_mask, **base_wc_kwargs)
             wc.generate_from_frequencies(frequencies)
         wc_img = Image.fromarray(wc.to_array())
         # 轻度锐化，降低词云字体在页面缩放后的发糊感
