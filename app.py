@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import html as html_module
 import re
 import os
 from collections import Counter
@@ -104,6 +105,30 @@ st.markdown(
             color:var(--aa-muted);
             font-size:13px;
             margin-top:2px;
+        }
+
+        /* AI 解说正文：字号/颜色与 caption、.aa-hint 一致；小标题略强调 */
+        .aa-ai-commentary{
+            line-height:1.65;
+        }
+        .aa-ai-commentary .aa-ai-section-title{
+            font-size:14px;
+            font-weight:800;
+            color:var(--aa-text);
+            margin:0.75rem 0 0.4rem 0;
+            letter-spacing:.02em;
+        }
+        .aa-ai-commentary .aa-ai-section-title:first-child{
+            margin-top:0;
+        }
+        .aa-ai-commentary .aa-ai-body{
+            font-size:13px;
+            color:var(--aa-muted);
+            margin:0 0 0.5rem 0;
+        }
+        .aa-ai-commentary .aa-ai-body strong{
+            font-weight:700;
+            color:rgba(44,32,24,0.82);
         }
 
         /* 弹窗风格：与首页卡片保持一致 */
@@ -399,23 +424,65 @@ def create_building_radar_chart(building_name: str, dimensions: dict[str, float]
         )
     )
     fig.update_layout(
-        title=f"{building_name} · 四维价值雷达",
+        title=dict(text=f"{building_name} · 四维价值雷达", y=0.98, yanchor="top"),
         showlegend=False,
-        height=320,
-        margin=dict(l=20, r=20, t=50, b=20),
+        height=400,
+        margin=dict(l=32, r=32, t=56, b=72),
         paper_bgcolor="rgba(0,0,0,0)",
         font=dict(size=11, color="#4A3728"),
         polar=dict(
             bgcolor="rgba(0,0,0,0)",
+            domain=dict(x=[0.02, 0.98], y=[0.02, 0.90]),
             radialaxis=dict(range=[0, 100], tickfont=dict(size=10), gridcolor="rgba(60,45,30,0.2)"),
-            angularaxis=dict(tickfont=dict(size=12, color="#4A3728")),
+            angularaxis=dict(
+                tickfont=dict(size=12, color="#4A3728"),
+                ticklen=6,
+            ),
         ),
     )
     return fig
 
 
+def format_ai_commentary_html(raw: str) -> str:
+    """将 AI 解说 Markdown（## 标题、**加粗**）转为 HTML，正文样式由 .aa-ai-commentary 控制。"""
+    text = raw.replace("\r\n", "\n").strip()
+    text = re.sub(r"  \n", "\n", text)
+    chunks: list[str] = []
+
+    def inline_bold(s: str) -> str:
+        parts = re.split(r"(\*\*.+?\*\*)", s)
+        out: list[str] = []
+        for part in parts:
+            if len(part) >= 4 and part.startswith("**") and part.endswith("**"):
+                inner = html_module.escape(part[2:-2])
+                out.append(f"<strong>{inner}</strong>")
+            else:
+                out.append(html_module.escape(part))
+        return "".join(out)
+
+    def paragraph_html(body: str) -> str:
+        lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
+        inner = "<br/>".join(inline_bold(ln) for ln in lines)
+        return f'<p class="aa-ai-body">{inner}</p>'
+
+    for block in re.split(r"\n\s*\n", text):
+        block = block.strip()
+        if not block:
+            continue
+        if block.startswith("#"):
+            lines = block.split("\n", 1)
+            title = re.sub(r"^#+\s*", "", lines[0]).strip()
+            chunks.append(f'<div class="aa-ai-section-title">{html_module.escape(title)}</div>')
+            if len(lines) > 1 and lines[1].strip():
+                chunks.append(paragraph_html(lines[1].strip()))
+        else:
+            chunks.append(paragraph_html(block))
+
+    return "".join(chunks)
+
+
 def build_building_ai_commentary(row: pd.Series, score: float, stars: str) -> str:
-    """生成古建筑 AI 解说（无模型依赖的稳定文案）。"""
+    """生成古建筑 AI 解说（无模型依赖）：四段 Markdown，含保护与参观拓展。"""
     name = str(row.get("单位名称（中文）", "该古建筑")).strip() or "该古建筑"
     era = str(row.get("时代（中文）", "")).strip() or "年代待考"
     batch = str(row.get("批次（中文）", "")).strip() or "未标注批次"
@@ -432,15 +499,21 @@ def build_building_ai_commentary(row: pd.Series, score: float, stars: str) -> st
     dim_desc = "、".join([f"{k}{v:.0f}" for k, v in dimensions.items()])
 
     return (
-        f"**{name}**位于**{region}**，时代信息为**{era}**，属于**{category}**类古建筑，"
-        f"在现有评分体系中综合得分为 **{score} 分（{stars}）**。  \n"
-        f"从历史脉络看，该建筑承载了当地社会与工艺演进的典型特征；从功能层面看，"
-        f"其空间组织与构件细节反映了当时的礼制、居住或公共活动需求。  \n"
-        f"四维评分为：{dim_desc}。其中**{best_dim}**表现最突出，"
-        f"说明该建筑在该维度具有较强代表性；相对薄弱项为**{weak_dim}**，"
-        f"后续可结合档案或实地资料进行补充说明。  \n"
-        f"结合保护信息（**{batch}**），建议在展示讲解中采用“时代背景 → 建筑功能 → 地方文化价值”的顺序，"
-        f"并补充同省同类建筑对比，能更清晰体现其在区域古建筑谱系中的位置。"
+        "## 历史脉络与地域背景  \n"
+        f"**{name}**坐落于**{region}**，文献与登记信息所示时代为**{era}**，在类型上归入**{category}**。"
+        f"结合政区语境，可将该遗存置于地方社会史与匠作传统中理解；若需深入，可比对同省同类文保单位的形制与题记材料。  \n"
+        f"本应用内综合评分为 **{score} 分（{stars}）**，四维为 {dim_desc}，供观展时快速把握价值侧重。  \n"
+        "## 形制特征与遗产价值  \n"
+        f"从空间与功能角度看，该类建筑常见院落组织、木结构体系与装饰意匠等要素，反映礼制、居住或公共活动的不同需求。"
+        f"评分上**{best_dim}**最为突出，宜作为讲解主线；**{weak_dim}**相对较低，解说中可提示观众结合实地勘察或档案再行印证。  \n"
+        "## 保护与传承建议  \n"
+        f"登记保护信息为**{batch}**。建议落实预防性保护思维：定期开展现状勘察与病害记录，木结构注意防潮防火与虫蛀监测，"
+        f"修缮应坚持「最小干预、可识别、可逆」原则；展示上可采用分层解说（遗存本体 / 历史层积 / 当代利用），并推进数字化测绘与档案公开，"
+        f"便于学术利用与公众教育。  \n"
+        "## 参观与导览提示  \n"
+        "到访前建议核实开放时段与预约政策，身着便于步行的鞋履并预留讲解时间。"
+        "参观时请勿触摸彩绘与木石构件，勿使用闪光灯拍摄敏感壁画或彩塑；雨雪天气注意屋面滴水与地面湿滑。"
+        "若在宗教或礼仪场所，请遵守现场秩序与着装要求，轻声缓步以尊重文化遗产与使用者。"
     )
 
 
@@ -473,28 +546,39 @@ def generate_ai_commentary_with_deepseek(
     best_dim: str,
     weak_dim: str,
 ) -> str:
-    """调用 DeepSeek API 实时生成古建筑解说。"""
+    """调用 DeepSeek API，按四段结构化提示生成深度解说。"""
     api_key = get_deepseek_api_key()
     if not api_key:
         raise RuntimeError("未配置 DEEPSEEK_API_KEY")
 
     region = " / ".join([x for x in [province, city, district] if x]) or "地区信息待补充"
     system_prompt = (
-        "你是中国古建筑数字展陈讲解员。请用简洁、专业、可展示的中文解说。"
-        "结构固定为三段：历史背景、建筑功能与价值、保护与展示建议。"
-        "每段2-3句，总长度控制在220-380字。避免空话。"
+        "你兼具中国建筑史与文物建筑保护领域素养，担任数字展陈与公众教育语境下的讲解员。"
+        "输出须为可上屏的专业中文，术语准确（如构架、形制、院落、木作、修缮、预防性保护、活化利用等），避免空话与过度抒情。"
+        "\n\n【版式】使用 Markdown，且必须依次包含下列四个二级标题（##），标题字面须完全一致：\n"
+        "## 历史脉络与地域背景\n"
+        "## 形制特征与遗产价值\n"
+        "## 保护与传承建议\n"
+        "## 参观与导览提示\n"
+        "每个标题下写 2–4 句；全文总字数约 480–800 字。可恰当使用 **加粗** 强调关键概念。"
+        "\n\n【各段要点】\n"
+        "1) 历史脉络：时代、政区地缘、在区域建筑谱系或类型学中的大致位置；信息不足时用「一般认为」「尚需档案印证」等谨慎表述。\n"
+        "2) 形制与价值：紧扣「类别」与给定「四维」及最强/最弱维度，点到空间组织、结构或装饰意匠的代表性；勿虚构具体营造年代、匠师名或未经核实的轶事。\n"
+        "3) 保护与传承：结合保护批次与建筑类型，从修缮原则（最小干预、可逆、可识别）、日常监测、防火防潮防虫、档案与数字化、合理展示利用等中选 2–4 条展开为可操作建议；勿编造真实不存在的修缮工程名称或批文号。\n"
+        "4) 参观导览：面向访客，写行前准备（开放信息、预约、交通大类提示）、参观礼仪、摄影与文物保护边界、天气/季节与安全提示；无具体开放时间时写普适建议。\n"
     )
     user_prompt = (
-        f"建筑名称：{building_name}\n"
-        f"地区：{region}\n"
-        f"时代：{era}\n"
-        f"类别：{category}\n"
-        f"保护批次：{batch}\n"
-        f"综合评分：{score:.1f}（{stars}）\n"
-        f"四维评分：{dim_desc}\n"
-        f"最强维度：{best_dim}\n"
-        f"相对薄弱维度：{weak_dim}\n"
-        "请按要求输出解说。"
+        f"请基于下列结构化数据撰写解说（数据可能不全，请在缺项处合理泛化而非杜撰）：\n"
+        f"- 建筑名称：{building_name}\n"
+        f"- 地区：{region}\n"
+        f"- 时代：{era}\n"
+        f"- 建筑类别（应用内分类）：{category}\n"
+        f"- 保护批次：{batch}\n"
+        f"- 综合评分：{score:.1f}（{stars}）\n"
+        f"- 四维评分：{dim_desc}\n"
+        f"- 最强维度：{best_dim}\n"
+        f"- 相对薄弱维度：{weak_dim}\n\n"
+        "严格按系统提示的四段标题与字数要求输出，不要输出开场白或结语套话。"
     )
 
     resp = requests.post(
@@ -509,8 +593,8 @@ def generate_ai_commentary_with_deepseek(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.6,
-            "max_tokens": 700,
+            "temperature": 0.55,
+            "max_tokens": 1100,
         },
         timeout=45,
     )
@@ -587,9 +671,17 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
         radar_fig = create_building_radar_chart(name, dimensions)
         st.plotly_chart(radar_fig, use_container_width=True, config={"displayModeBar": False})
 
-    st.markdown("#### AI 解说")
-    commentary, is_realtime_ai = build_building_commentary(row_series, score, stars)
-    st.markdown(commentary)
+    st.markdown("#### AI 深度解说")
+    st.caption(
+        "含历史脉络、形制价值、保护建议与参观指南；由模型按结构化提示输出。"
+        "启用 DeepSeek 时将实时生成，通常需等待数秒至十余秒，页面会出现加载提示。"
+    )
+    with st.spinner("正在生成 AI 解说，请稍候…"):
+        commentary, is_realtime_ai = build_building_commentary(row_series, score, stars)
+    st.markdown(
+        f'<div class="aa-ai-commentary">{format_ai_commentary_html(commentary)}</div>',
+        unsafe_allow_html=True,
+    )
     st.caption("解说来源：DeepSeek 实时生成" if is_realtime_ai else "解说来源：本地模板（未配置 DeepSeek 或调用失败）")
 
 
@@ -1353,6 +1445,28 @@ def build_name_word_frequencies(df: pd.DataFrame, top_n: int = 120) -> dict[str,
     return dict(token_counter.most_common(top_n))
 
 
+def get_font_path() -> Optional[str]:
+    """自动下载并返回中文字体路径；下载失败则返回 None（词云使用默认字体，中文可能乱码）。"""
+    font_dir = Path(__file__).resolve().parent / "fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    font_path = font_dir / "SourceHanSansSC-Regular.otf"
+
+    if font_path.exists():
+        return str(font_path)
+
+    url = (
+        "https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/"
+        "SourceHanSansSC-Regular.otf"
+    )
+    try:
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        font_path.write_bytes(response.content)
+        return str(font_path)
+    except Exception:
+        return None
+
+
 def render_name_word_cloud(df: pd.DataFrame) -> None:
     """渲染建筑名称词云。"""
     frequencies = build_name_word_frequencies(df, top_n=120)
@@ -1365,97 +1479,38 @@ def render_name_word_cloud(df: pd.DataFrame) -> None:
 
     try:
         from wordcloud import WordCloud  # type: ignore
-        import matplotlib.font_manager as fm  # type: ignore
 
-        # 先尝试项目内置字体（适配 Streamlit Cloud）
-        project_dir = Path(__file__).resolve().parent
-        bundled_font_candidates = [
-            project_dir / "fonts" / "SimHei.ttf",
-            project_dir / "fonts" / "simhei.ttf",
-            project_dir / "fonts" / "SourceHanSansSC-Regular.otf",
-            project_dir / "fonts" / "SourceHanSansCN-Regular.otf",
-        ]
-        bundled_font = next((str(p) for p in bundled_font_candidates if p.exists()), None)
+        font_path = get_font_path()
 
-        # 再检查常见系统中文字体路径（Windows/macOS/Linux）
-        font_candidates = [
-            "C:/Windows/Fonts/msyh.ttc",
-            "C:/Windows/Fonts/simhei.ttf",
-            "C:/Windows/Fonts/simsun.ttc",
-            "C:/Windows/Fonts/msyhbd.ttc",
-            "/System/Library/Fonts/PingFang.ttc",
-            "/System/Library/Fonts/Hiragino Sans GB.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        ]
-
-        def detect_chinese_font() -> Optional[str]:
-            direct = next((p for p in font_candidates if Path(p).exists()), None)
-            if direct:
-                return direct
-
-            # 再从系统字体中按关键词检索
-            chinese_keywords = [
-                "noto", "cjk", "wqy", "simhei", "simsun", "msyh",
-                "pingfang", "heiti", "hans", "song", "kai",
-            ]
-            for fpath in fm.findSystemFonts(fontext="ttf") + fm.findSystemFonts(fontext="ttc"):
-                low = fpath.lower()
-                if any(k in low for k in chinese_keywords):
-                    return fpath
-            return None
-
-        font_path = bundled_font if bundled_font else detect_chinese_font()
-        if font_path is None:
-            raise RuntimeError("未找到可用中文字体。请在项目根目录的 fonts 文件夹放入 SimHei.ttf 或 SourceHanSansSC-Regular.otf。")
+        base_wc_kwargs: dict[str, object] = {
+            "width": 2600,
+            "height": 1200,
+            "max_words": 260,
+            "background_color": "#FFFFFF",
+            "mode": "RGB",
+            "color_func": ancient_theme_color_func,
+            "prefer_horizontal": 0.82,
+            "random_state": 42,
+            "margin": 1,
+            "contour_width": 0,
+            "scale": 3,
+            "min_font_size": 8,
+            "max_font_size": 220,
+            "collocations": False,
+            "repeat": False,
+        }
+        if font_path:
+            base_wc_kwargs["font_path"] = font_path
 
         mask = build_wordcloud_mask(shape="tower", width=2600, height=1200)
 
-        wc = WordCloud(
-            font_path=font_path,
-            width=2600,
-            height=1200,
-            max_words=260,
-            background_color="#FFFFFF",
-            mode="RGB",
-            color_func=ancient_theme_color_func,
-            prefer_horizontal=0.82,
-            random_state=42,
-            margin=1,
-            mask=mask,
-            contour_width=0,
-            scale=3,
-            min_font_size=8,
-            max_font_size=220,
-            collocations=False,
-            repeat=False,
-            relative_scaling=0.32,
-        )
+        wc = WordCloud(mask=mask, relative_scaling=0.32, **base_wc_kwargs)
         try:
             wc.generate_from_frequencies(frequencies)
         except Exception:
             # 兜底：塔型失败时回退到简化桥形，保证可见
             fallback_mask = build_wordcloud_mask(shape="river_bridge", width=2600, height=1200)
-            wc = WordCloud(
-                font_path=font_path,
-                width=2600,
-                height=1200,
-                max_words=260,
-                background_color="#FFFFFF",
-                mode="RGB",
-                color_func=ancient_theme_color_func,
-                prefer_horizontal=0.82,
-                random_state=42,
-                margin=1,
-                mask=fallback_mask,
-                contour_width=0,
-                scale=3,
-                min_font_size=8,
-                max_font_size=220,
-                collocations=False,
-                repeat=False,
-            )
+            wc = WordCloud(mask=fallback_mask, **base_wc_kwargs)
             wc.generate_from_frequencies(frequencies)
         wc_img = Image.fromarray(wc.to_array())
         # 轻度锐化，降低词云字体在页面缩放后的发糊感
