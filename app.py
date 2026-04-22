@@ -649,10 +649,14 @@ def build_building_commentary(row: pd.Series, score: float, stars: str) -> tuple
 @st.dialog("古建筑详情", width="large")
 def show_building_detail_dialog(row_data: dict[str, object]) -> None:
     """点击卡片后显示弹窗：雷达图 + AI解说。"""
-    name = str(row_data.get("单位名称（中文）", "古建筑")).strip() or "古建筑"
-    score = float(row_data.get("综合评分", 0))
-    stars = str(row_data.get("星级", get_star_rating(score)))
-    row_series = pd.Series(row_data)
+    # 中文注释：弹窗内容以 session_state 为准，支持“相似建筑”点击后在弹窗内切换
+    active_row_data = st.session_state.get("active_building_dialog_row") or row_data
+    st.session_state["active_building_dialog_row"] = active_row_data
+
+    name = str(active_row_data.get("单位名称（中文）", "古建筑")).strip() or "古建筑"
+    score = float(active_row_data.get("综合评分", 0))
+    stars = str(active_row_data.get("星级", get_star_rating(score)))
+    row_series = pd.Series(active_row_data)
 
     st.markdown(
         f"""
@@ -672,17 +676,114 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
         st.plotly_chart(radar_fig, use_container_width=True, config={"displayModeBar": False})
 
     st.markdown("#### AI 深度解说")
-    st.caption(
-        "含历史脉络、形制价值、保护建议与参观指南；由模型按结构化提示输出。"
-        "启用 DeepSeek 时将实时生成，通常需等待数秒至十余秒，页面会出现加载提示。"
+    use_realtime_ai = st.checkbox(
+        "启用 DeepSeek 实时解说（较慢）",
+        value=False,
+        key=f"dialog_use_realtime_ai_{name}",
     )
-    with st.spinner("正在生成 AI 解说，请稍候…"):
-        commentary, is_realtime_ai = build_building_commentary(row_series, score, stars)
+    st.caption(
+        "默认使用本地解说模板（更快）；勾选上方选项后将调用 DeepSeek 实时生成，通常需等待数秒至十余秒。"
+    )
+    with st.spinner("正在生成解说，请稍候…"):
+        if use_realtime_ai:
+            commentary, is_realtime_ai = build_building_commentary(row_series, score, stars)
+        else:
+            commentary, is_realtime_ai = build_building_ai_commentary(row_series, score, stars), False
     st.markdown(
         f'<div class="aa-ai-commentary">{format_ai_commentary_html(commentary)}</div>',
         unsafe_allow_html=True,
     )
     st.caption("解说来源：DeepSeek 实时生成" if is_realtime_ai else "解说来源：本地模板（未配置 DeepSeek 或调用失败）")
+
+    # ===== 相似建筑推荐 =====
+    # 中文注释：相似推荐计算量较大，改为按需开启，保证弹窗先秒开
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    show_similar = st.checkbox(
+        "显示相似建筑推荐（可选）",
+        value=False,
+        key=f"dialog_show_similar_{name}",
+    )
+    if not show_similar:
+        st.caption("勾选后再计算并展示相似建筑推荐。")
+        return
+    st.markdown(
+        """
+        <div style="font-size:14px; color:#8B4513; font-weight:bold; margin-bottom:10px;">
+            🏛️ 相似建筑推荐
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        full_df = load_app_data()
+    except Exception:
+        full_df = pd.DataFrame()
+
+    if full_df.empty:
+        st.caption("暂无可用于推荐的完整数据集。")
+        return
+
+    # 中文注释：准备当前建筑的匹配维度
+    cur_name = str(row_series.get("单位名称（中文）", "")).strip()
+    cur_era_label = get_era_label(str(row_series.get("时代（中文）", "")))
+    cur_category = classify_building_category(cur_name)
+    cur_province = str(row_series.get("省级政区名称（中文）", "")).strip()
+
+    # 中文注释：构造候选集，排除当前建筑本身（同名+同省视为同一条）
+    cand = full_df.copy()
+    if "单位名称（中文）" in cand.columns:
+        cand_name = cand["单位名称（中文）"].fillna("").astype(str).str.strip()
+    else:
+        cand_name = pd.Series([""] * len(cand))
+    if "省级政区名称（中文）" in cand.columns:
+        cand_prov = cand["省级政区名称（中文）"].fillna("").astype(str).str.strip()
+    else:
+        cand_prov = pd.Series([""] * len(cand))
+    cand = cand[~((cand_name == cur_name) & (cand_prov == cur_province))].copy()
+
+    if cand.empty:
+        st.caption("暂无可推荐的相似建筑。")
+        return
+
+    # 中文注释：计算候选的朝代/类型/省份匹配度，并按匹配度+评分排序
+    cand["__朝代"] = cand["时代（中文）"].apply(get_era_label) if "时代（中文）" in cand.columns else "其他"
+    cand["__类型"] = cand["单位名称（中文）"].fillna("").astype(str).apply(classify_building_category) if "单位名称（中文）" in cand.columns else "其他"
+    cand["__省份"] = cand_prov.loc[cand.index]
+
+    cand["__match_era"] = (cand["__朝代"] == cur_era_label).astype(int)
+    cand["__match_cat"] = (cand["__类型"] == cur_category).astype(int)
+    cand["__match_prov"] = (cand["__省份"] == cur_province).astype(int)
+    cand["__match_score"] = cand["__match_era"] + cand["__match_cat"] + cand["__match_prov"]
+
+    # 中文注释：复用评分函数计算综合评分与星级（若已存在则覆盖为一致口径）
+    cand["综合评分"] = cand.apply(calculate_building_score, axis=1)
+    cand["星级"] = cand["综合评分"].apply(get_star_rating)
+
+    rec_df = (
+        cand.sort_values(by=["__match_score", "综合评分"], ascending=[False, False])
+        .head(3)
+        .reset_index(drop=True)
+    )
+
+    if rec_df.empty:
+        st.caption("暂无可推荐的相似建筑。")
+        return
+
+    # 中文注释：推荐卡片（3 列横排），点击后切换弹窗展示内容
+    rec_cols = st.columns(3)
+    for i in range(min(3, len(rec_df))):
+        r = rec_df.iloc[i]
+        r_name = str(r.get("单位名称（中文）", "未知古建")).strip() or "未知古建"
+        r_era = get_era_label(str(r.get("时代（中文）", "")))
+        r_prov = str(r.get("省级政区名称（中文）", "")).strip() or "未知省份"
+        r_stars = str(r.get("星级", "⭐"))
+
+        label = f"{r_name}\n{r_era} · {r_prov}\n{r_stars}"
+        with rec_cols[i]:
+            if st.button(label, key=f"sim_rec_{name}_{i}", use_container_width=True):
+                st.session_state["active_building_dialog_row"] = r.to_dict()
+                st.rerun()
 
 
 @st.cache_data(show_spinner=False)
@@ -744,6 +845,7 @@ def build_sidebar(df: pd.DataFrame) -> tuple[str, str, str]:
         """
         <style>
         @import url('https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;600;700&display=swap');
 
         /* 主内容区紧凑化：减少首屏空白，提升展示完整度 */
@@ -835,13 +937,13 @@ def build_sidebar(df: pd.DataFrame) -> tuple[str, str, str]:
         }
 
         section[data-testid="stSidebar"] .sidebar-title {
-            font-family: "ZCOOL XiaoWei", "Noto Serif SC", "SimSun", serif !important;
-            font-size: 1.02rem;
-            font-weight: 600;
+            font-family: "Ma Shan Zheng", "ZCOOL XiaoWei", "Noto Serif SC", "SimSun", serif !important;
+            font-size: 1.92rem;
+            font-weight: 700;
             text-align: center;
             letter-spacing: 0.03em;
-            line-height: 1.45;
-            margin: 0.02rem 0 0.12rem 0;
+            line-height: 1.3;
+            margin: 0.14rem 0 0.44rem 0;
             color: #F5F0E6;
             white-space: normal;
             word-break: keep-all;
@@ -1308,7 +1410,7 @@ def build_sidebar(df: pd.DataFrame) -> tuple[str, str, str]:
     )
 
     # 模块一：项目主标题（纯文字）
-    st.sidebar.markdown('<div class="sidebar-title">中国古建筑<br>数字图谱</div>', unsafe_allow_html=True)
+    st.sidebar.markdown('<div class="sidebar-title">匠意千年</div>', unsafe_allow_html=True)
 
     # 模块二：视图切换（卡片内标题样式）
     view = st.sidebar.radio(
@@ -1317,6 +1419,12 @@ def build_sidebar(df: pd.DataFrame) -> tuple[str, str, str]:
         index=0,
         label_visibility="collapsed",
     )
+    # 中文注释：切换视图时清理“建筑详情弹窗”残留状态，避免进入新视图后自动弹出旧弹窗
+    last_view = st.session_state.get("last_selected_view")
+    if last_view is not None and last_view != view:
+        st.session_state["show_building_dialog"] = False
+        st.session_state["active_building_dialog_row"] = None
+    st.session_state["last_selected_view"] = view
 
     # 模块三：省份筛选（稳定布局，保留原有逻辑）
     st.sidebar.markdown('<hr class="sidebar-sep" />', unsafe_allow_html=True)
@@ -1470,7 +1578,14 @@ def get_font_path() -> Optional[str]:
 def render_name_word_cloud(df: pd.DataFrame) -> None:
     """渲染建筑名称词云。"""
     frequencies = build_name_word_frequencies(df, top_n=120)
-    st.markdown("### 建筑名称词云")
+    st.markdown(
+        """
+        <div style="font-size:18px; color:#8B4513; font-weight:bold; text-align:center; margin-bottom:10px;">
+            建筑名称词云
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption("基于当前筛选数据的建筑名称高频词（动态联动省份与搜索条件）。")
 
     if not frequencies:
@@ -1848,17 +1963,496 @@ def build_scored_ranking_table(df: pd.DataFrame, top_n: int = 20, include_region
     })
 
 
+def build_full_scored_ranking(df: pd.DataFrame) -> pd.DataFrame:
+    """构建完整评分榜（按综合评分降序）。"""
+    if df.empty:
+        return pd.DataFrame(columns=["排名", "建筑名称", "朝代", "省份", "星级", "综合评分"])
+
+    ranking_df = df.copy()
+    ranking_df["综合评分"] = ranking_df.apply(calculate_building_score, axis=1)
+    ranking_df["星级"] = ranking_df["综合评分"].apply(get_star_rating)
+    ranking_df["朝代"] = ranking_df["时代（中文）"].apply(get_era_label) if "时代（中文）" in ranking_df.columns else "其他"
+    ranking_df = ranking_df.sort_values(by="综合评分", ascending=False).reset_index(drop=True)
+    ranking_df.insert(0, "排名", range(1, len(ranking_df) + 1))
+    return ranking_df
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def generate_ai_card_hint_with_deepseek(
+    building_name: str,
+    era: str,
+    batch: str,
+    province: str,
+    city: str,
+    district: str,
+    category: str,
+    score: float,
+    stars: str,
+) -> str:
+    """调用 DeepSeek 生成卡片一行解析（简短版）。"""
+    api_key = get_deepseek_api_key()
+    if not api_key:
+        raise RuntimeError("未配置 DEEPSEEK_API_KEY")
+
+    region = " / ".join([x for x in [province, city, district] if x]) or "地区信息待补充"
+    system_prompt = "你是古建筑评分助手。只输出一行中文短句（不超过18字），说明该建筑评分靠前原因。禁止换行、禁止编号。"
+    user_prompt = (
+        f"建筑：{building_name}\n地区：{region}\n时代：{era}\n类别：{category}\n"
+        f"保护批次：{batch}\n评分：{score:.1f}（{stars}）\n"
+        "请输出一句原因说明。"
+    )
+    resp = requests.post(
+        "https://api.deepseek.com/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.5,
+            "max_tokens": 80,
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    text = str(content).replace("\n", " ").strip(" 。")
+    if not text:
+        raise RuntimeError("DeepSeek 返回内容为空")
+    return text[:24]
+
+
+def build_rule_based_card_hint(row: pd.Series) -> str:
+    """基于评分维度生成一行预设解析。"""
+    dims = calculate_building_dimensions(row)
+    if dims.get("保护级别", 0) >= 85:
+        return "国家级重点保护单位"
+    if dims.get("年代久远度", 0) >= 85:
+        return "始建于唐宋，历史悠久"
+    if dims.get("建筑稀有性", 0) >= 85:
+        return "建筑类型罕见，研究价值高"
+    if dims.get("历史价值", 0) >= 85:
+        return "见证重要历史事件"
+    return "年代久远，保护级别高"
+
+
+def get_card_ai_hint(row: pd.Series) -> str:
+    """获取卡片一行解析：优先 DeepSeek，失败回退规则文案。"""
+    name_raw = str(row.get("单位名称（中文）", "该古建筑")).strip() or "该古建筑"
+    era_raw = str(row.get("时代（中文）", "")).strip() or str(row.get("朝代", "其他"))
+    batch_raw = str(row.get("批次（中文）", "")).strip() or "未标注批次"
+    prov_raw = str(row.get("省级政区名称（中文）", "")).strip()
+    city_raw = str(row.get("市级政区名称（中文）", "")).strip()
+    dist_raw = str(row.get("县级政区名称（中文）", "")).strip()
+    score_raw = float(row.get("综合评分", 0))
+    stars = str(row.get("星级", "⭐"))
+    category_raw = classify_building_category(name_raw)
+    try:
+        return generate_ai_card_hint_with_deepseek(
+            building_name=name_raw,
+            era=era_raw,
+            batch=batch_raw,
+            province=prov_raw,
+            city=city_raw,
+            district=dist_raw,
+            category=category_raw,
+            score=score_raw,
+            stars=stars,
+        )
+    except Exception:
+        return build_rule_based_card_hint(row)
+
+
+def render_ranking_cards(
+    ranking_df: pd.DataFrame,
+    cards_per_row: int = 5,
+    limit: Optional[int] = None,
+    show_ai_hint: bool = False,
+    enable_click_dialog: bool = False,
+    click_query_param: str = "dialog_rank",
+    click_keep_detail_page: bool = False,
+    direct_open_dialog: bool = False,
+) -> None:
+    """渲染评分榜卡片（统一卡片样式，可复用在总览和详情页）。"""
+    if ranking_df.empty:
+        st.info("当前筛选条件下暂无可用于评分排行的古建筑数据。")
+        return
+
+    display_df = ranking_df.head(limit).copy() if limit is not None else ranking_df.copy()
+    total = len(display_df)
+
+    # 中文注释：按每行列数循环渲染卡片，保持统一视觉样式
+    for start in range(0, total, cards_per_row):
+        cols = st.columns(cards_per_row)
+        for offset in range(cards_per_row):
+            idx = start + offset
+            with cols[offset]:
+                if idx >= total:
+                    st.empty()
+                    continue
+                row = display_df.iloc[idx]
+                rank = int(row.get("排名", idx + 1))
+                name = str(row.get("单位名称（中文）", "未知古建")).strip() or "未知古建"
+                era = str(row.get("朝代", "其他")).strip() or "其他"
+                province = str(row.get("省级政区名称（中文）", "未知省份")).strip() or "未知省份"
+                stars = str(row.get("星级", "⭐"))
+                ai_hint_html = ""
+                if show_ai_hint:
+                    # 中文注释：调用共用解析函数，避免重复 AI/规则逻辑
+                    row_series = row if isinstance(row, pd.Series) else pd.Series(row)
+                    ai_hint = get_card_ai_hint(row_series)
+
+                    ai_hint_html = (
+                        f'<div style="margin-top:8px; font-size:12px; color:#6B4B35; '
+                        f'font-style:italic; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">'
+                        f'AI解析：{ai_hint}</div>'
+                    )
+
+                # 中文注释：可选的“整卡可点击”能力（用于详情页点击弹窗）
+                rank_for_click = int(row.get("排名", idx + 1))
+                card_open = ""
+                card_close = ""
+                if enable_click_dialog and not direct_open_dialog:
+                    # 中文注释：详情页点击卡片时保留 view_detail_page=1，避免刷新后跳回总览
+                    prefix = "view_detail_page=1&" if click_keep_detail_page else ""
+                    card_open = (
+                        f'<a href="?{prefix}{click_query_param}={rank_for_click}" '
+                        f'style="text-decoration:none; color:inherit;">'
+                    )
+                    card_close = "</a>"
+                if direct_open_dialog and enable_click_dialog:
+                    # 中文注释：详情页“直接弹窗”模式——使用原生按钮触发弹窗（不改 URL、不跳转）
+                    btn_label = (
+                        f"第{rank}名\n"
+                        f"{name}\n"
+                        f"朝代：{era}\n"
+                        f"省份：{province}\n"
+                        f"星级：{stars}"
+                    )
+                    if st.button(btn_label, key=f"detail_card_click_{rank_for_click}", use_container_width=True):
+                        st.session_state["show_building_dialog"] = True
+                        st.session_state["active_building_dialog_row"] = row.to_dict()
+                else:
+                    st.markdown(
+                        f"""
+                        {card_open}
+                        <div style="
+                            background:#FAF0E6;
+                            border:1px solid #DEB887;
+                            border-radius:12px;
+                            padding:16px;
+                            margin-top:8px;
+                            margin-bottom:20px;
+                            min-height:180px;
+                            color:#4A3728;
+                            cursor:{'pointer' if enable_click_dialog else 'default'};
+                        ">
+            <div style="font-weight:700; color:#8B4513; margin-bottom:8px; text-align:center;">第{rank}名</div>
+                            <div style="font-weight:800; color:#8B4513; margin-bottom:8px; line-height:1.4;">{name}</div>
+                            <div style="margin-bottom:6px;">朝代：{era}</div>
+                            <div style="margin-bottom:6px;">省份：{province}</div>
+                            <div style="margin-bottom:6px;">星级：{stars}</div>
+                            {ai_hint_html}
+                        </div>
+                        {card_close}
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+
+def render_top_treasure_cards(df: pd.DataFrame, top_n: int = 5) -> None:
+    """渲染“国家宝藏·顶级古建评分榜”卡片模块。"""
+    st.markdown(
+        """
+        <div style="
+            text-align:center;
+            font-size:18px;
+            color:#8B4513;
+            font-weight:bold;
+            margin: 10px 0 10px 0;
+        ">
+            <span style="
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                min-width:38px;
+                height:24px;
+                border:1px solid rgba(139,69,19,.35);
+                border-radius:6px;
+                font-size:13px;
+                font-weight:800;
+                color:#8B4513;
+                margin-right:8px;
+                background:rgba(139,69,19,.06);
+            ">国藏</span>国家宝藏 · 顶级古建评分榜（Top 5）
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    ranking_df = build_full_scored_ranking(df)
+    top_df = ranking_df.head(top_n).copy()
+    if top_df.empty:
+        st.info("当前筛选条件下暂无可用于评分排行的古建筑数据。")
+        return
+
+    # 中文注释：点击整张卡片后，通过查询参数触发同一详情弹窗（复用地图探索页弹窗逻辑）
+    clicked_idx_raw = str(st.query_params.get("treasure_card_idx", "")).strip()
+    if clicked_idx_raw.isdigit():
+        clicked_idx = int(clicked_idx_raw)
+        if 0 <= clicked_idx < len(top_df):
+            st.session_state["show_building_dialog"] = True
+            st.session_state["active_building_dialog_row"] = top_df.iloc[clicked_idx].to_dict()
+        try:
+            del st.query_params["treasure_card_idx"]
+        except Exception:
+            pass
+
+    cols = st.columns(5)
+    for idx in range(5):
+        with cols[idx]:
+            if idx >= len(top_df):
+                st.empty()
+                continue
+            row = top_df.iloc[idx]
+            rank = int(row.get("排名", idx + 1))
+            name = str(row.get("单位名称（中文）", "未知古建")).strip() or "未知古建"
+            era = str(row.get("朝代", "其他")).strip() or "其他"
+            province = str(row.get("省级政区名称（中文）", "未知省份")).strip() or "未知省份"
+            stars = str(row.get("星级", "⭐"))
+
+            btn_label = (
+                f"第{rank}名\n"
+                f"{name}\n"
+                f"朝代：{era}\n"
+                f"省份：{province}\n"
+                f"星级：{stars}"
+            )
+            if st.button(btn_label, key=f"top_treasure_card_{idx}", use_container_width=True):
+                st.session_state["show_building_dialog"] = True
+                st.session_state["active_building_dialog_row"] = row.to_dict()
+
+    # 中文注释：使用 Markdown + HTML 渲染纯文字“查看更多”，放在卡片模块外部右下角
+    st.markdown(
+        """
+        <style>
+        .treasure-more-wrap{
+            display:flex;
+            justify-content:flex-end;
+            margin-top:8px;
+        }
+        .treasure-more-link{
+            text-decoration:none;
+            color:#8B4513;
+            font-size:14px;
+            line-height:1.2;
+        }
+        .treasure-more-link:hover{
+            text-decoration:underline;
+        }
+        </style>
+        <div class="treasure-more-wrap">
+            <a class="treasure-more-link" href="?view_detail_page=1">查看更多 →</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_treasure_detail_page(df: pd.DataFrame) -> None:
+    """渲染全国古建筑综合评分排行榜详情页。"""
+    # 中文注释：左上角纯文字“返回总览”，与“查看更多”样式保持对称
+    st.markdown(
+        """
+        <style>
+        .treasure-back-wrap{
+            display:flex;
+            justify-content:flex-start;
+            margin-top:2px;
+            margin-bottom:4px;
+        }
+        .treasure-back-link{
+            text-decoration:none;
+            color:#8B4513;
+            font-size:14px;
+            line-height:1.2;
+        }
+        .treasure-back-link:hover{
+            text-decoration:underline;
+        }
+        </style>
+        <div class="treasure-back-wrap">
+            <a class="treasure-back-link" href="?view_detail_page=0">← 返回总览</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div style="text-align:center; margin: 6px 0 4px 0;">
+            <div style="font-size:30px; font-weight:900; color:#8B4513;">
+                <span style="
+                    display:inline-flex;
+                    align-items:center;
+                    justify-content:center;
+                    min-width:42px;
+                    height:28px;
+                    border:1px solid rgba(139,69,19,.35);
+                    border-radius:7px;
+                    font-size:14px;
+                    font-weight:800;
+                    color:#8B4513;
+                    margin-right:10px;
+                    background:rgba(139,69,19,.06);
+                    vertical-align:middle;
+                ">总榜</span>全国古建筑综合评分排行榜
+            </div>
+            <div style="font-size:14px; color:#4A3728; margin-top:6px;">
+                基于保护级别、年代久远、稀有性、历史价值的综合评估
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    ranking_df = build_full_scored_ranking(df)
+    if ranking_df.empty:
+        st.info("当前筛选条件下暂无可用于评分排行的古建筑数据。")
+        return
+
+    # 中文注释：详情页卡片点击采用“直接弹窗”，不依赖 URL 参数
+
+    # 中文注释：详情页分页参数（每页 12 张卡片，即每行 4 张共 3 行）
+    page_size = 12
+    total_items = len(ranking_df)
+    total_pages = max(1, (total_items + page_size - 1) // page_size)
+    current_page = int(st.session_state.get("treasure_detail_page_index", 1))
+    current_page = min(max(current_page, 1), total_pages)
+    st.session_state["treasure_detail_page_index"] = current_page
+
+    page_col1, page_col2, page_col3 = st.columns([1.2, 2.2, 1.6])
+    with page_col1:
+        st.caption(f"共 {total_items} 条")
+    with page_col2:
+        # 中文注释：通过下拉页码实现分页切换，避免超长页面
+        selected_page = st.selectbox(
+            "页码",
+            options=list(range(1, total_pages + 1)),
+            index=current_page - 1,
+            key="treasure_detail_page_select",
+            label_visibility="collapsed",
+        )
+        if int(selected_page) != current_page:
+            st.session_state["treasure_detail_page_index"] = int(selected_page)
+            st.rerun()
+    with page_col3:
+        st.caption(f"第 {current_page} / {total_pages} 页")
+
+    start_idx = (current_page - 1) * page_size
+    end_idx = min(start_idx + page_size, total_items)
+    page_df = ranking_df.iloc[start_idx:end_idx].copy()
+
+    # 中文注释：详情页卡片按钮样式（仅作用于当前“卡片区”，尽量贴近原卡片视觉）
+    st.markdown(
+        """
+        <div class="aa-detail-card-scope"></div>
+        <style>
+        /* 作用域：仅命中包含 .aa-detail-card-scope 的容器内按钮 */
+        div:has(> .aa-detail-card-scope) div[data-testid="stButton"] > button{
+            width:100% !important;
+            background:#FAF0E6 !important;
+            border:1px solid #DEB887 !important;
+            border-radius:12px !important;
+            padding:16px !important;
+            margin-top:8px !important;
+            margin-bottom:20px !important;
+            min-height:180px !important;
+            color:#4A3728 !important;
+            text-align:left !important;
+            white-space:pre-line !important;
+            line-height:1.5 !important;
+            font-weight:700 !important;
+            box-shadow: 0 8px 20px rgba(44,22,10,.07) !important;
+            cursor:pointer !important;
+            /* 中文注释：强制卡片内所有文字左对齐 */
+            justify-content:flex-start !important;
+            align-items:flex-start !important;
+        }
+        div:has(> .aa-detail-card-scope) div[data-testid="stButton"] > button *{
+            text-align:left !important;
+            justify-content:flex-start !important;
+            align-items:flex-start !important;
+        }
+        div:has(> .aa-detail-card-scope) div[data-testid="stButton"] > button:hover{
+            border-color: rgba(139,69,19,0.35) !important;
+            box-shadow: 0 10px 24px rgba(44,22,10,.1) !important;
+            transform: translateY(-1px);
+        }
+        div:has(> .aa-detail-card-scope) div[data-testid="stButton"] > button:focus,
+        div:has(> .aa-detail-card-scope) div[data-testid="stButton"] > button:focus-visible{
+            outline: none !important;
+            box-shadow: 0 0 0 2px rgba(139,69,19,.2) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 中文注释：详情页采用每行 4 张卡片展示当前页榜单（外观保持不变，点击直接弹窗）
+    render_ranking_cards(
+        page_df,
+        cards_per_row=4,
+        limit=None,
+        enable_click_dialog=True,
+        direct_open_dialog=True,
+    )
+    # 中文注释：在卡片区域底部增加留白，避免页面视觉过于拥挤
+    st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
+
+
 def render_dashboard(filtered_df: pd.DataFrame) -> None:
     """渲染总览仪表板视图。"""
-    st.title("中国古建筑·数字图谱")
-    st.caption("以数据可视化方式呈现古建筑分布、年代与类别特征。")
-
     # 省份详情/总览状态
     if "dashboard_selected_province" not in st.session_state:
         st.session_state["dashboard_selected_province"] = None
     if "dashboard_map_reset_token" not in st.session_state:
         st.session_state["dashboard_map_reset_token"] = 0
+    if "view_detail_page" not in st.session_state:
+        st.session_state["view_detail_page"] = False
+
+    # 中文注释：接收“查看更多”链接参数并同步到 session_state
+    qp_view_detail = str(st.query_params.get("view_detail_page", "")).strip().lower()
+    if qp_view_detail in {"1", "true", "yes"}:
+        st.session_state["view_detail_page"] = True
+        st.session_state["treasure_detail_page_index"] = 1
+        try:
+            del st.query_params["view_detail_page"]
+        except Exception:
+            pass
+    elif qp_view_detail in {"0", "false", "no"}:
+        st.session_state["view_detail_page"] = False
+        try:
+            del st.query_params["view_detail_page"]
+        except Exception:
+            pass
+
     selected_dashboard_province = st.session_state.get("dashboard_selected_province")
+    view_detail_page = bool(st.session_state.get("view_detail_page", False))
+
+    # 中文注释：切换到评分榜详情页时，直接渲染详情并结束当前总览渲染
+    if view_detail_page:
+        render_treasure_detail_page(filtered_df)
+        return
+
+    # 仅总览页展示左上角项目标题；详情页不显示
+    st.title("中国古建筑·数字图谱")
+    st.caption("以数据可视化方式呈现古建筑分布、年代与类别特征。")
 
     # KPI 卡片
     total_count = int(len(filtered_df))
@@ -1968,8 +2562,8 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
     # 通过限制展示条目数量 + 紧凑样式，保证布局稳定
     left_html = [
         "<div style='display:flex; flex-direction:column; padding-right:6px;'>",
-        "<h4 style='font-size: 15px; margin-bottom: 5px; white-space: nowrap; text-align:center; color:#8B4513; font-weight:800;'>"
-        "🏛️ 古建筑数量省份排名</h4>",
+        "<h4 style='font-size:clamp(14px,1.15vw,18px); margin-bottom:10px; white-space:nowrap; line-height:1.2; text-align:center; color:#8B4513; font-weight:bold;'>"
+        "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:34px; height:22px; border:1px solid rgba(139,69,19,.35); border-radius:6px; font-size:12px; font-weight:800; color:#8B4513; margin-right:8px; background:rgba(139,69,19,.06);'>省榜</span>古建筑数量省份排名</h4>",
         "<div style='flex:1;'>",
     ]
     for i, (prov, cnt) in enumerate(province_counts.sort_values(ascending=False).items(), start=1):
@@ -1984,8 +2578,8 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
 
     right_html = [
         "<div style='display:flex; flex-direction:column; padding-left:6px;'>",
-        "<h4 style='font-size: 15px; margin-bottom: 5px; white-space: nowrap; text-align:center; color:#8B4513; font-weight:800;'>"
-        "📅 古建筑数量朝代排名</h4>",
+        "<h4 style='font-size:clamp(14px,1.15vw,18px); margin-bottom:10px; white-space:nowrap; line-height:1.2; text-align:center; color:#8B4513; font-weight:bold;'>"
+        "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:34px; height:22px; border:1px solid rgba(139,69,19,.35); border-radius:6px; font-size:12px; font-weight:800; color:#8B4513; margin-right:8px; background:rgba(139,69,19,.06);'>朝榜</span>古建筑数量朝代排名</h4>",
         "<div style='flex:1;'>",
     ]
     right_order = [e for e in era_major] + (["其他"] if int(era_counts.get("其他", 0)) > 0 else [])
@@ -1999,7 +2593,34 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
     right_html.append("</div></div>")
 
     if selected_dashboard_province:
-        st.button("← 返回总览", on_click=clear_dashboard_selected_province)
+        st.markdown(
+            """
+            <style>
+            /* 中文注释：省份详情页“返回总览”按钮改为更协调的横向卡片按钮 */
+            div:has(> .aa-dashboard-back-scope) div[data-testid="stButton"] > button{
+                min-height: 38px !important;
+                height: 38px !important;
+                border-radius: 10px !important;
+                padding: 0 10px !important;
+                font-size: 0.88rem !important;
+                font-weight: 700 !important;
+                white-space: nowrap !important;
+                line-height: 1 !important;
+                justify-content: center !important;
+                align-items: center !important;
+            }
+            </style>
+            <div class="aa-dashboard-back-scope"></div>
+            """,
+            unsafe_allow_html=True,
+        )
+        back_col, _ = st.columns([1.5, 8.5])
+        with back_col:
+            st.button(
+                "← 返回总览",
+                on_click=clear_dashboard_selected_province,
+                use_container_width=True,
+            )
         col_map, col_table = st.columns([2, 3])
         with col_map:
             clicked_province = st.plotly_chart(
@@ -2026,6 +2647,63 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
             ].copy()
             st.subheader(f"{selected_dashboard_province} · 古建筑评分排名")
             province_ranking_df = build_scored_ranking_table(province_df, top_n=20, include_region=True)
+            st.markdown(
+                """
+                <style>
+                /* 中文注释：仅调整 DataFrame 主题样式，不改变原有组件渲染方式 */
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"]{
+                    border:1px solid rgba(139,69,19,.22) !important;
+                    border-radius:16px !important;
+                    overflow:hidden !important;
+                    box-shadow:0 10px 24px rgba(44,22,10,.10) !important;
+                    background:linear-gradient(180deg, rgba(255,255,255,.64) 0%, rgba(250,240,230,.52) 100%) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] thead th{
+                    background:linear-gradient(180deg, rgba(139,69,19,.16) 0%, rgba(139,69,19,.10) 100%) !important;
+                    color:#5E341A !important;
+                    font-weight:800 !important;
+                    letter-spacing:.02em !important;
+                    border-bottom:1px solid rgba(139,69,19,.22) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody td{
+                    color:#4A3728 !important;
+                    border-bottom:1px solid rgba(139,69,19,.10) !important;
+                    font-size:14px !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr td:first-child{
+                    color:#7A3D17 !important;
+                    font-weight:800 !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr:nth-child(even) td{
+                    background:rgba(250,240,230,.66) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr:nth-child(odd) td{
+                    background:rgba(255,255,255,.42) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr:hover td{
+                    background:rgba(222,184,135,.34) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] [data-testid="stHorizontalBlock"],
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] [data-testid="stVerticalBlock"]{
+                    scrollbar-width: thin;
+                    scrollbar-color: rgba(139,69,19,.45) rgba(245,236,225,.55);
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] ::-webkit-scrollbar{
+                    height: 10px;
+                    width: 10px;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] ::-webkit-scrollbar-thumb{
+                    background: rgba(139,69,19,.45);
+                    border-radius: 999px;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] ::-webkit-scrollbar-track{
+                    background: rgba(245,236,225,.55);
+                }
+                </style>
+                <div class="aa-ranking-scope"></div>
+                """,
+                unsafe_allow_html=True,
+            )
             st.dataframe(province_ranking_df, use_container_width=True, hide_index=True)
     else:
         col_left, col_center, col_right = st.columns([0.8, 4, 0.8])
@@ -2070,14 +2748,15 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
         with col_right:
             st.markdown("".join(right_html), unsafe_allow_html=True)
 
-    # 第三行（插入）：建筑名称词云（仅在总览时渲染；省份详情页跳过以提升流畅度）
+    # 第三行（插入）：国家宝藏 Top5 评分榜（仅在总览时渲染）
     if not selected_dashboard_province:
-        render_name_word_cloud(filtered_df)
+        render_top_treasure_cards(filtered_df, top_n=5)
 
-    # 第四行：仅总览展示全局星级排名（省份详情页隐藏）
+    # 第四行（插入）：建筑名称词云（仅在总览时渲染；省份详情页跳过以提升流畅度）
     if not selected_dashboard_province:
-        display_df = build_scored_ranking_table(filtered_df, top_n=20, include_region=False)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        # 中文注释：点击卡片准备弹窗时，跳过词云重渲染，优先提升“点卡即弹窗”响应速度
+        if not st.session_state.get("_opening_dialog_now", False):
+            render_name_word_cloud(filtered_df)
 
 
 def render_map_view(filtered_df: pd.DataFrame, selected_province: str) -> None:
@@ -2209,7 +2888,9 @@ def render_map_view(filtered_df: pd.DataFrame, selected_province: str) -> None:
                             clicked_row_data = row.to_dict()
 
                 if clicked_row_data:
-                    show_building_detail_dialog(clicked_row_data)
+                    # 中文注释：通过 session_state 统一打开弹窗，便于弹窗内切换相似建筑
+                    st.session_state["show_building_dialog"] = True
+                    st.session_state["active_building_dialog_row"] = clicked_row_data
             st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.markdown(
@@ -2231,10 +2912,23 @@ def main() -> None:
     filtered_df = apply_province_filter(df, selected_province)
     filtered_df = apply_name_search_filter(filtered_df, search_keyword)
 
+    pending_dialog_row = None
+    if st.session_state.get("show_building_dialog") and st.session_state.get("active_building_dialog_row"):
+        pending_dialog_row = st.session_state.get("active_building_dialog_row")
+        st.session_state["show_building_dialog"] = False
+        st.session_state["_opening_dialog_now"] = True
+    else:
+        st.session_state["_opening_dialog_now"] = False
+
     if view == "总览仪表板":
         render_dashboard(filtered_df)
     else:
         render_map_view(filtered_df, selected_province)
+
+    # 中文注释：统一在主流程末尾打开弹窗；并在本轮结束后复位“弹窗提速模式”
+    if pending_dialog_row:
+        show_building_detail_dialog(pending_dialog_row)
+    st.session_state["_opening_dialog_now"] = False
 
 
 if __name__ == "__main__":
