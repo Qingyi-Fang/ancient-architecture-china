@@ -596,7 +596,7 @@ def generate_ai_commentary_with_deepseek(
             "temperature": 0.55,
             "max_tokens": 1100,
         },
-        timeout=45,
+        timeout=75,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -694,6 +694,10 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
         unsafe_allow_html=True,
     )
     st.caption("解说来源：DeepSeek 实时生成" if is_realtime_ai else "解说来源：本地模板（未配置 DeepSeek 或调用失败）")
+    if use_realtime_ai and not is_realtime_ai:
+        st.warning("本次实时解说未成功，已自动回退到本地模板。")
+        if st.button("刷新重试实时解说", key=f"retry_realtime_commentary_{name}"):
+            st.rerun()
 
     # ===== 相似建筑推荐 =====
     # 中文注释：相似推荐计算量较大，改为按需开启，保证弹窗先秒开
