@@ -676,12 +676,19 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
         st.plotly_chart(radar_fig, use_container_width=True, config={"displayModeBar": False})
 
     st.markdown("#### AI 深度解说")
-    st.caption(
-        "含历史脉络、形制价值、保护建议与参观指南；由模型按结构化提示输出。"
-        "启用 DeepSeek 时将实时生成，通常需等待数秒至十余秒，页面会出现加载提示。"
+    use_realtime_ai = st.checkbox(
+        "启用 DeepSeek 实时解说（较慢）",
+        value=True,
+        key=f"dialog_use_realtime_ai_{name}",
     )
-    with st.spinner("正在生成 AI 解说，请稍候…"):
-        commentary, is_realtime_ai = build_building_commentary(row_series, score, stars)
+    st.caption(
+        "默认使用本地解说模板（更快）；勾选上方选项后将调用 DeepSeek 实时生成，通常需等待数秒至十余秒。"
+    )
+    with st.spinner("正在生成解说，请稍候…"):
+        if use_realtime_ai:
+            commentary, is_realtime_ai = build_building_commentary(row_series, score, stars)
+        else:
+            commentary, is_realtime_ai = build_building_ai_commentary(row_series, score, stars), False
     st.markdown(
         f'<div class="aa-ai-commentary">{format_ai_commentary_html(commentary)}</div>',
         unsafe_allow_html=True,
@@ -689,8 +696,16 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
     st.caption("解说来源：DeepSeek 实时生成" if is_realtime_ai else "解说来源：本地模板（未配置 DeepSeek 或调用失败）")
 
     # ===== 相似建筑推荐 =====
-    # 中文注释：在 AI 解说下方增加相似建筑推荐（朝代/类型/省份三维匹配）
+    # 中文注释：相似推荐计算量较大，改为按需开启，保证弹窗先秒开
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    show_similar = st.checkbox(
+        "显示相似建筑推荐（可选）",
+        value=False,
+        key=f"dialog_show_similar_{name}",
+    )
+    if not show_similar:
+        st.caption("勾选后再计算并展示相似建筑推荐。")
+        return
     st.markdown(
         """
         <div style="font-size:14px; color:#8B4513; font-weight:bold; margin-bottom:10px;">
@@ -1404,6 +1419,12 @@ def build_sidebar(df: pd.DataFrame) -> tuple[str, str, str]:
         index=0,
         label_visibility="collapsed",
     )
+    # 中文注释：切换视图时清理“建筑详情弹窗”残留状态，避免进入新视图后自动弹出旧弹窗
+    last_view = st.session_state.get("last_selected_view")
+    if last_view is not None and last_view != view:
+        st.session_state["show_building_dialog"] = False
+        st.session_state["active_building_dialog_row"] = None
+    st.session_state["last_selected_view"] = view
 
     # 模块三：省份筛选（稳定布局，保留原有逻辑）
     st.sidebar.markdown('<hr class="sidebar-sep" />', unsafe_allow_html=True)
@@ -2107,7 +2128,7 @@ def render_ranking_cards(
                 if direct_open_dialog and enable_click_dialog:
                     # 中文注释：详情页“直接弹窗”模式——使用原生按钮触发弹窗（不改 URL、不跳转）
                     btn_label = (
-                        f"🏅 第{rank}名\n"
+                        f"第{rank}名\n"
                         f"{name}\n"
                         f"朝代：{era}\n"
                         f"省份：{province}\n"
@@ -2116,7 +2137,6 @@ def render_ranking_cards(
                     if st.button(btn_label, key=f"detail_card_click_{rank_for_click}", use_container_width=True):
                         st.session_state["show_building_dialog"] = True
                         st.session_state["active_building_dialog_row"] = row.to_dict()
-                        st.rerun()
                 else:
                     st.markdown(
                         f"""
@@ -2132,7 +2152,7 @@ def render_ranking_cards(
                             color:#4A3728;
                             cursor:{'pointer' if enable_click_dialog else 'default'};
                         ">
-                            <div style="font-weight:700; color:#8B4513; margin-bottom:8px;">🏅 第{rank}名</div>
+            <div style="font-weight:700; color:#8B4513; margin-bottom:8px; text-align:center;">第{rank}名</div>
                             <div style="font-weight:800; color:#8B4513; margin-bottom:8px; line-height:1.4;">{name}</div>
                             <div style="margin-bottom:6px;">朝代：{era}</div>
                             <div style="margin-bottom:6px;">省份：{province}</div>
@@ -2156,7 +2176,20 @@ def render_top_treasure_cards(df: pd.DataFrame, top_n: int = 5) -> None:
             font-weight:bold;
             margin: 10px 0 10px 0;
         ">
-            🏆 国家宝藏 · 顶级古建评分榜（Top 5）
+            <span style="
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                min-width:38px;
+                height:24px;
+                border:1px solid rgba(139,69,19,.35);
+                border-radius:6px;
+                font-size:13px;
+                font-weight:800;
+                color:#8B4513;
+                margin-right:8px;
+                background:rgba(139,69,19,.06);
+            ">国藏</span>国家宝藏 · 顶级古建评分榜（Top 5）
         </div>
         """,
         unsafe_allow_html=True,
@@ -2192,35 +2225,17 @@ def render_top_treasure_cards(df: pd.DataFrame, top_n: int = 5) -> None:
             era = str(row.get("朝代", "其他")).strip() or "其他"
             province = str(row.get("省级政区名称（中文）", "未知省份")).strip() or "未知省份"
             stars = str(row.get("星级", "⭐"))
-            ai_hint = get_card_ai_hint(row if isinstance(row, pd.Series) else pd.Series(row))
 
-            st.markdown(
-                f"""
-                <a href="?treasure_card_idx={idx}" style="text-decoration:none; color:inherit;">
-                    <div style="
-                        background:#FAF0E6;
-                        border:1px solid #DEB887;
-                        border-radius:12px;
-                        padding:16px;
-                        margin-top:8px;
-                        margin-bottom:20px;
-                        min-height:180px;
-                        color:#4A3728;
-                        cursor:pointer;
-                    ">
-                        <div style="font-weight:700; color:#8B4513; margin-bottom:8px;">🏅 第{rank}名</div>
-                        <div style="font-weight:800; color:#8B4513; margin-bottom:8px; line-height:1.4;">{name}</div>
-                        <div style="margin-bottom:6px;">朝代：{era}</div>
-                        <div style="margin-bottom:6px;">省份：{province}</div>
-                        <div style="margin-bottom:6px;">星级：{stars}</div>
-                        <div style="margin-top:8px; font-size:12px; color:#6B4B35; font-style:italic; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                            AI解析：{ai_hint}
-                        </div>
-                    </div>
-                </a>
-                """,
-                unsafe_allow_html=True,
+            btn_label = (
+                f"第{rank}名\n"
+                f"{name}\n"
+                f"朝代：{era}\n"
+                f"省份：{province}\n"
+                f"星级：{stars}"
             )
+            if st.button(btn_label, key=f"top_treasure_card_{idx}", use_container_width=True):
+                st.session_state["show_building_dialog"] = True
+                st.session_state["active_building_dialog_row"] = row.to_dict()
 
     # 中文注释：使用 Markdown + HTML 渲染纯文字“查看更多”，放在卡片模块外部右下角
     st.markdown(
@@ -2281,7 +2296,23 @@ def render_treasure_detail_page(df: pd.DataFrame) -> None:
     st.markdown(
         """
         <div style="text-align:center; margin: 6px 0 4px 0;">
-            <div style="font-size:30px; font-weight:900; color:#8B4513;">🏛️ 全国古建筑综合评分排行榜</div>
+            <div style="font-size:30px; font-weight:900; color:#8B4513;">
+                <span style="
+                    display:inline-flex;
+                    align-items:center;
+                    justify-content:center;
+                    min-width:42px;
+                    height:28px;
+                    border:1px solid rgba(139,69,19,.35);
+                    border-radius:7px;
+                    font-size:14px;
+                    font-weight:800;
+                    color:#8B4513;
+                    margin-right:10px;
+                    background:rgba(139,69,19,.06);
+                    vertical-align:middle;
+                ">总榜</span>全国古建筑综合评分排行榜
+            </div>
             <div style="font-size:14px; color:#4A3728; margin-top:6px;">
                 基于保护级别、年代久远、稀有性、历史价值的综合评估
             </div>
@@ -2531,8 +2562,8 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
     # 通过限制展示条目数量 + 紧凑样式，保证布局稳定
     left_html = [
         "<div style='display:flex; flex-direction:column; padding-right:6px;'>",
-        "<h4 style='font-size:18px; margin-bottom:10px; white-space: nowrap; text-align:center; color:#8B4513; font-weight:bold;'>"
-        "🏛️ 古建筑数量省份排名</h4>",
+        "<h4 style='font-size:clamp(14px,1.15vw,18px); margin-bottom:10px; white-space:nowrap; line-height:1.2; text-align:center; color:#8B4513; font-weight:bold;'>"
+        "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:34px; height:22px; border:1px solid rgba(139,69,19,.35); border-radius:6px; font-size:12px; font-weight:800; color:#8B4513; margin-right:8px; background:rgba(139,69,19,.06);'>省榜</span>古建筑数量省份排名</h4>",
         "<div style='flex:1;'>",
     ]
     for i, (prov, cnt) in enumerate(province_counts.sort_values(ascending=False).items(), start=1):
@@ -2547,8 +2578,8 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
 
     right_html = [
         "<div style='display:flex; flex-direction:column; padding-left:6px;'>",
-        "<h4 style='font-size:18px; margin-bottom:10px; white-space: nowrap; text-align:center; color:#8B4513; font-weight:bold;'>"
-        "📅 古建筑数量朝代排名</h4>",
+        "<h4 style='font-size:clamp(14px,1.15vw,18px); margin-bottom:10px; white-space:nowrap; line-height:1.2; text-align:center; color:#8B4513; font-weight:bold;'>"
+        "<span style='display:inline-flex; align-items:center; justify-content:center; min-width:34px; height:22px; border:1px solid rgba(139,69,19,.35); border-radius:6px; font-size:12px; font-weight:800; color:#8B4513; margin-right:8px; background:rgba(139,69,19,.06);'>朝榜</span>古建筑数量朝代排名</h4>",
         "<div style='flex:1;'>",
     ]
     right_order = [e for e in era_major] + (["其他"] if int(era_counts.get("其他", 0)) > 0 else [])
@@ -2562,7 +2593,34 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
     right_html.append("</div></div>")
 
     if selected_dashboard_province:
-        st.button("← 返回总览", on_click=clear_dashboard_selected_province)
+        st.markdown(
+            """
+            <style>
+            /* 中文注释：省份详情页“返回总览”按钮改为更协调的横向卡片按钮 */
+            div:has(> .aa-dashboard-back-scope) div[data-testid="stButton"] > button{
+                min-height: 38px !important;
+                height: 38px !important;
+                border-radius: 10px !important;
+                padding: 0 10px !important;
+                font-size: 0.88rem !important;
+                font-weight: 700 !important;
+                white-space: nowrap !important;
+                line-height: 1 !important;
+                justify-content: center !important;
+                align-items: center !important;
+            }
+            </style>
+            <div class="aa-dashboard-back-scope"></div>
+            """,
+            unsafe_allow_html=True,
+        )
+        back_col, _ = st.columns([1.5, 8.5])
+        with back_col:
+            st.button(
+                "← 返回总览",
+                on_click=clear_dashboard_selected_province,
+                use_container_width=True,
+            )
         col_map, col_table = st.columns([2, 3])
         with col_map:
             clicked_province = st.plotly_chart(
@@ -2589,6 +2647,63 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
             ].copy()
             st.subheader(f"{selected_dashboard_province} · 古建筑评分排名")
             province_ranking_df = build_scored_ranking_table(province_df, top_n=20, include_region=True)
+            st.markdown(
+                """
+                <style>
+                /* 中文注释：仅调整 DataFrame 主题样式，不改变原有组件渲染方式 */
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"]{
+                    border:1px solid rgba(139,69,19,.22) !important;
+                    border-radius:16px !important;
+                    overflow:hidden !important;
+                    box-shadow:0 10px 24px rgba(44,22,10,.10) !important;
+                    background:linear-gradient(180deg, rgba(255,255,255,.64) 0%, rgba(250,240,230,.52) 100%) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] thead th{
+                    background:linear-gradient(180deg, rgba(139,69,19,.16) 0%, rgba(139,69,19,.10) 100%) !important;
+                    color:#5E341A !important;
+                    font-weight:800 !important;
+                    letter-spacing:.02em !important;
+                    border-bottom:1px solid rgba(139,69,19,.22) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody td{
+                    color:#4A3728 !important;
+                    border-bottom:1px solid rgba(139,69,19,.10) !important;
+                    font-size:14px !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr td:first-child{
+                    color:#7A3D17 !important;
+                    font-weight:800 !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr:nth-child(even) td{
+                    background:rgba(250,240,230,.66) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr:nth-child(odd) td{
+                    background:rgba(255,255,255,.42) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] tbody tr:hover td{
+                    background:rgba(222,184,135,.34) !important;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] [data-testid="stHorizontalBlock"],
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] [data-testid="stVerticalBlock"]{
+                    scrollbar-width: thin;
+                    scrollbar-color: rgba(139,69,19,.45) rgba(245,236,225,.55);
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] ::-webkit-scrollbar{
+                    height: 10px;
+                    width: 10px;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] ::-webkit-scrollbar-thumb{
+                    background: rgba(139,69,19,.45);
+                    border-radius: 999px;
+                }
+                div:has(> .aa-ranking-scope) [data-testid="stDataFrame"] ::-webkit-scrollbar-track{
+                    background: rgba(245,236,225,.55);
+                }
+                </style>
+                <div class="aa-ranking-scope"></div>
+                """,
+                unsafe_allow_html=True,
+            )
             st.dataframe(province_ranking_df, use_container_width=True, hide_index=True)
     else:
         col_left, col_center, col_right = st.columns([0.8, 4, 0.8])
@@ -2639,7 +2754,9 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
 
     # 第四行（插入）：建筑名称词云（仅在总览时渲染；省份详情页跳过以提升流畅度）
     if not selected_dashboard_province:
-        render_name_word_cloud(filtered_df)
+        # 中文注释：点击卡片准备弹窗时，跳过词云重渲染，优先提升“点卡即弹窗”响应速度
+        if not st.session_state.get("_opening_dialog_now", False):
+            render_name_word_cloud(filtered_df)
 
 
 def render_map_view(filtered_df: pd.DataFrame, selected_province: str) -> None:
@@ -2795,14 +2912,23 @@ def main() -> None:
     filtered_df = apply_province_filter(df, selected_province)
     filtered_df = apply_name_search_filter(filtered_df, search_keyword)
 
+    pending_dialog_row = None
+    if st.session_state.get("show_building_dialog") and st.session_state.get("active_building_dialog_row"):
+        pending_dialog_row = st.session_state.get("active_building_dialog_row")
+        st.session_state["show_building_dialog"] = False
+        st.session_state["_opening_dialog_now"] = True
+    else:
+        st.session_state["_opening_dialog_now"] = False
+
     if view == "总览仪表板":
         render_dashboard(filtered_df)
     else:
         render_map_view(filtered_df, selected_province)
 
-    # 中文注释：统一在主流程末尾打开弹窗，支持弹窗内切换“相似建筑”
-    if st.session_state.get("show_building_dialog") and st.session_state.get("active_building_dialog_row"):
-        show_building_detail_dialog(st.session_state["active_building_dialog_row"])
+    # 中文注释：统一在主流程末尾打开弹窗；并在本轮结束后复位“弹窗提速模式”
+    if pending_dialog_row:
+        show_building_detail_dialog(pending_dialog_row)
+    st.session_state["_opening_dialog_now"] = False
 
 
 if __name__ == "__main__":
