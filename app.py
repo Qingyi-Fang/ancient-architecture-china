@@ -684,16 +684,29 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
     st.caption(
         "默认使用本地解说模板（更快）；勾选上方选项后将调用 DeepSeek 实时生成，通常需等待数秒至十余秒。"
     )
-    with st.spinner("正在生成解说，请稍候…"):
+    # 中文注释：先渲染占位区域，确保弹窗立刻可见；解说生成完成后再回填
+    commentary_placeholder = st.empty()
+    with commentary_placeholder.container():
+        st.markdown(
+            "<div style='opacity:.55; padding:10px 12px; border:1px dashed rgba(139,69,19,.28); "
+            "border-radius:12px; background:rgba(250,240,230,.55);'>"
+            "🤖 AI 正在生成深度解析，请稍候…"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    with st.spinner("🤖 AI 正在生成深度解析，请稍候…"):
         if use_realtime_ai:
             commentary, is_realtime_ai = build_building_commentary(row_series, score, stars)
         else:
             commentary, is_realtime_ai = build_building_ai_commentary(row_series, score, stars), False
-    st.markdown(
-        f'<div class="aa-ai-commentary">{format_ai_commentary_html(commentary)}</div>',
-        unsafe_allow_html=True,
-    )
-    st.caption("解说来源：DeepSeek 实时生成" if is_realtime_ai else "解说来源：本地模板（未配置 DeepSeek 或调用失败）")
+
+    with commentary_placeholder.container():
+        st.markdown(
+            f'<div class="aa-ai-commentary">{format_ai_commentary_html(commentary)}</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("解说来源：DeepSeek 实时生成" if is_realtime_ai else "解说来源：本地模板（未配置 DeepSeek 或调用失败）")
     if use_realtime_ai and not is_realtime_ai:
         st.warning("本次实时解说未成功，已自动回退到本地模板。")
         if st.button("刷新重试实时解说", key=f"retry_realtime_commentary_{name}"):
@@ -718,6 +731,99 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    def render_similar_recommend_cards(rec_df: pd.DataFrame, key_prefix: str = "sim_rec") -> None:
+        """渲染相似建筑推荐卡片（3 列横排），点击后切换弹窗展示内容。"""
+        if rec_df.empty:
+            st.caption("暂无可推荐的相似建筑。")
+            return
+
+        rec_cols = st.columns(3)
+        for i in range(min(3, len(rec_df))):
+            r = rec_df.iloc[i]
+            r_name = str(r.get("单位名称（中文）", "未知古建")).strip() or "未知古建"
+            r_era = get_era_label(str(r.get("时代（中文）", "")))
+            r_prov = str(r.get("省级政区名称（中文）", "")).strip() or "未知省份"
+            r_stars = str(r.get("星级", "⭐"))
+
+            label = f"{r_name}\n{r_era} · {r_prov}\n{r_stars}"
+            with rec_cols[i]:
+                if st.button(label, key=f"{key_prefix}_{i}", use_container_width=True):
+                    st.session_state["active_building_dialog_row"] = r.to_dict()
+                    st.rerun()
+
+    @st.cache_data(show_spinner=False, ttl=3600)
+    def get_ai_similar_names(
+        target_str: str,
+        candidate_lines: tuple[str, ...],
+        top_n: int = 3,
+    ) -> tuple[list[str], bool, str]:
+        """调用 DeepSeek 返回推荐建筑名称列表（严格从候选列表中选择）。"""
+        api_key = get_deepseek_api_key()
+        if not api_key:
+            return [], False, "未配置 DEEPSEEK_API_KEY"
+
+        system_prompt = (
+            "你是古建筑智能推荐助手。从候选列表中选择最相似的3个建筑。"
+            "只输出JSON，不要任何多余文字。JSON格式必须为："
+            "{\"recommended_names\":[\"名称1\",\"名称2\",\"名称3\"]}。"
+            "名称必须与候选列表中的名称完全一致。"
+        )
+        user_prompt = (
+            f"目标建筑：{target_str}\n"
+            "候选列表：\n"
+            + "\n".join(candidate_lines)
+            + "\n请返回最相似的3个。"
+        )
+
+        try:
+            resp = requests.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 140,
+                },
+                timeout=8,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            text = str(content).strip()
+            if not text:
+                return [], False, "DeepSeek 返回为空"
+
+            import json as json_module
+
+            parsed = json_module.loads(text)
+            names = parsed.get("recommended_names", [])
+            if not isinstance(names, list):
+                return [], False, "JSON 字段 recommended_names 非列表"
+
+            candidate_name_set = {ln.split("|", 1)[0] for ln in candidate_lines if "|" in ln}
+            valid = [str(n).strip() for n in names if str(n).strip() in candidate_name_set]
+            if not valid:
+                return [], False, "推荐名称未通过候选集校验"
+
+            # 去重保序
+            seen: set[str] = set()
+            out: list[str] = []
+            for n in valid:
+                if n in seen:
+                    continue
+                seen.add(n)
+                out.append(n)
+            return out[:top_n], True, "ok"
+        except Exception as e:
+            return [], False, f"{type(e).__name__}"
 
     try:
         full_df = load_app_data()
@@ -764,30 +870,66 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
     cand["综合评分"] = cand.apply(calculate_building_score, axis=1)
     cand["星级"] = cand["综合评分"].apply(get_star_rating)
 
-    rec_df = (
+    # 多维匹配：按匹配度 + 综合评分排序
+    rule_rec_df = (
         cand.sort_values(by=["__match_score", "综合评分"], ascending=[False, False])
         .head(3)
         .reset_index(drop=True)
     )
 
-    if rec_df.empty:
-        st.caption("暂无可推荐的相似建筑。")
-        return
+    tab_rule, tab_ai = st.tabs(["📊 多维匹配推荐", "🤖 AI 智能推荐"])
 
-    # 中文注释：推荐卡片（3 列横排），点击后切换弹窗展示内容
-    rec_cols = st.columns(3)
-    for i in range(min(3, len(rec_df))):
-        r = rec_df.iloc[i]
-        r_name = str(r.get("单位名称（中文）", "未知古建")).strip() or "未知古建"
-        r_era = get_era_label(str(r.get("时代（中文）", "")))
-        r_prov = str(r.get("省级政区名称（中文）", "")).strip() or "未知省份"
-        r_stars = str(r.get("星级", "⭐"))
+    with tab_rule:
+        render_similar_recommend_cards(rule_rec_df, key_prefix=f"sim_rule_{name}")
+        st.caption("基于朝代/类型/省份三维匹配度排序。")
 
-        label = f"{r_name}\n{r_era} · {r_prov}\n{r_stars}"
-        with rec_cols[i]:
-            if st.button(label, key=f"sim_rec_{name}_{i}", use_container_width=True):
-                st.session_state["active_building_dialog_row"] = r.to_dict()
-                st.rerun()
+    with tab_ai:
+        # 中文注释：候选池取前 12 个（按多维匹配排序），避免 prompt 过长
+        work_df = cand.sort_values(by=["__match_score", "综合评分"], ascending=[False, False]).head(12).copy()
+        candidate_lines: list[str] = []
+        for _, r in work_df.iterrows():
+            nm = str(r.get("单位名称（中文）", "")).strip()
+            if not nm:
+                continue
+            line = (
+                f"{nm}|{get_era_label(str(r.get('时代（中文）', '')))}|"
+                f"{str(r.get('省级政区名称（中文）', '')).strip()}|"
+                f"{classify_building_category(nm)}"
+            )
+            candidate_lines.append(line)
+
+        target_str = f"{cur_name}|{cur_era_label}|{cur_province}|{cur_category}"
+        names, ok, msg = get_ai_similar_names(target_str, tuple(candidate_lines), top_n=3)
+
+        ai_rec_df = pd.DataFrame()
+        if ok and names:
+            picked_rows: list[pd.Series] = []
+            for nm in names:
+                hit = work_df[work_df["单位名称（中文）"].fillna("").astype(str).str.strip() == nm]
+                if hit.empty:
+                    hit = cand[cand["单位名称（中文）"].fillna("").astype(str).str.strip() == nm]
+                if not hit.empty:
+                    picked_rows.append(hit.iloc[0])
+            if picked_rows:
+                ai_rec_df = pd.DataFrame(picked_rows).reset_index(drop=True)
+
+        # 中文注释：不足 3 个时用多维匹配补齐；完全失败则降级为多维匹配
+        final_df = ai_rec_df.copy() if not ai_rec_df.empty else pd.DataFrame()
+        if len(final_df) < 3:
+            supplement = rule_rec_df.copy()
+            if not final_df.empty and "单位名称（中文）" in final_df.columns:
+                already = set(final_df["单位名称（中文）"].fillna("").astype(str).str.strip())
+                supplement = supplement[
+                    ~supplement["单位名称（中文）"].fillna("").astype(str).str.strip().isin(already)
+                ]
+            final_df = pd.concat([final_df, supplement], ignore_index=True).head(3)
+
+        if ok and not ai_rec_df.empty:
+            render_similar_recommend_cards(final_df, key_prefix=f"sim_ai_{name}")
+            st.caption("DeepSeek 智能推荐，结果经候选集精确校验。")
+        else:
+            render_similar_recommend_cards(rule_rec_df, key_prefix=f"sim_ai_{name}")
+            st.caption(f"AI 推荐暂不可用，已切换为多维匹配推荐（{msg}）")
 
 
 @st.cache_data(show_spinner=False)
