@@ -288,24 +288,23 @@ def load_app_data() -> pd.DataFrame:
 
 
 def get_main_era(df: pd.DataFrame) -> str:
-    """计算主要朝代（排除“其他”后出现次数最多）。"""
+    """计算主要朝代（出现次数最多）。"""
     era_col = "时代（中文）"
     if era_col not in df.columns or df.empty:
         return "-"
 
-    era_series = df[era_col].fillna("").astype(str).apply(get_era_label)
-    era_series = era_series[era_series != "其他"]
-    if era_series.empty:
-        return "-"
+    era_keywords = ["唐", "宋", "元", "明", "清"]
+    counts: dict[str, int] = {}
+    era_series = df[era_col].fillna("").astype(str)
+    for era in era_keywords:
+        counts[era] = int(era_series.str.contains(era, regex=False, na=False).sum())
 
-    counts = era_series.value_counts()
-    top_era = str(counts.index[0])
-    top_count = int(counts.iloc[0])
-    return f"{top_era}（{top_count}处）"
+    major_era = max(counts, key=counts.get) if counts else "-"
+    return major_era if counts.get(major_era, 0) > 0 else "-"
 
 
 def get_main_category(df: pd.DataFrame) -> str:
-    """计算主要建筑类别（出现次数最多）。"""
+    """计算主要建筑类别（排除“其他”后出现次数最多）。"""
     name_col = "单位名称（中文）"
     if name_col not in df.columns or df.empty:
         return "-"
@@ -313,7 +312,12 @@ def get_main_category(df: pd.DataFrame) -> str:
     category_series = df[name_col].apply(classify_building_category)
     if category_series.empty:
         return "-"
-    return str(category_series.value_counts().idxmax())
+    category_counts = category_series.value_counts()
+    non_other_counts = category_counts[category_counts.index != "其他"]
+
+    if not non_other_counts.empty:
+        return str(non_other_counts.idxmax())
+    return str(category_counts.idxmax()) if not category_counts.empty else "-"
 
 
 def get_era_label(era_text: str) -> str:
@@ -2668,7 +2672,7 @@ def render_dashboard(filtered_df: pd.DataFrame) -> None:
         c1.metric("古建筑总数", f"{total_count:,}")
         c2.metric("覆盖省份", f"{province_count}")
         c3.metric("主要朝代", major_era)
-        c4.metric("主要类别", major_category)
+        c4.metric("主要类别（除其他）", major_category)
 
     # 赛题布局：左省份排名列表 + 中国地图 + 右朝代排名列表（高度 500px 对齐）
     province_col = "省级政区名称（中文）"
