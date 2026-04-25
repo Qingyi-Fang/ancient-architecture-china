@@ -326,36 +326,76 @@ def get_era_label(era_text: str) -> str:
     return text or "其他"
 
 
-def calculate_building_score(row: pd.Series) -> float:
-    """根据保护级别、年代、稀有性、历史价值计算综合评分。"""
-    dimensions = calculate_building_dimensions(row)
+def _extract_batch_number(batch_text: str) -> Optional[int]:
+    """从“第X批”文本中提取批次编号。"""
+    text = str(batch_text or "").strip()
+    if not text:
+        return None
+
+    direct_match = re.search(r"第\s*(\d+)\s*批", text)
+    if direct_match:
+        return int(direct_match.group(1))
+
+    cn_digit_map = {
+        "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+        "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    }
+    for cn_char, num in cn_digit_map.items():
+        if f"第{cn_char}批" in text:
+            return num
+    return None
+
+
+def build_rarity_score_map(df: pd.DataFrame) -> dict[str, float]:
+    """按类别出现频率计算稀有性分：越少见分越高。"""
+    if df.empty or "单位名称（中文）" not in df.columns:
+        return {}
+
+    categories = df["单位名称（中文）"].fillna("").astype(str).apply(classify_building_category)
+    counts = categories.value_counts()
+    if counts.empty:
+        return {}
+
+    min_cnt = int(counts.min())
+    max_cnt = int(counts.max())
+    if max_cnt == min_cnt:
+        return {cat: 80.0 for cat in counts.index}
+
+    rarity_map: dict[str, float] = {}
+    for cat, cnt in counts.items():
+        # 60~100 区间线性映射：频次越低，分数越高
+        score = 60.0 + ((max_cnt - int(cnt)) / (max_cnt - min_cnt)) * 40.0
+        rarity_map[str(cat)] = round(float(score), 1)
+    return rarity_map
+
+
+def calculate_building_score(row: pd.Series, rarity_score_map: Optional[dict[str, float]] = None) -> float:
+    """根据保护级别、年代久远度、建筑稀有性计算综合评分。"""
+    dimensions = calculate_building_dimensions(row, rarity_score_map=rarity_score_map)
     total_score = (
-        dimensions["保护级别"] * 0.35
-        + dimensions["年代久远度"] * 0.30
-        + dimensions["建筑稀有性"] * 0.20
-        + dimensions["历史价值"] * 0.15
+        dimensions["保护级别"] * 0.40
+        + dimensions["年代久远度"] * 0.35
+        + dimensions["建筑稀有性"] * 0.25
     )
     return round(float(total_score), 1)
 
 
-def calculate_building_dimensions(row: pd.Series) -> dict[str, float]:
-    """计算古建筑四维评分（用于雷达图与解说）。"""
+def calculate_building_dimensions(
+    row: pd.Series,
+    rarity_score_map: Optional[dict[str, float]] = None,
+) -> dict[str, float]:
+    """计算古建筑三维评分（用于雷达图与解说）。"""
     batch_text = str(row.get("批次（中文）", "")).strip()
     era_text = str(row.get("时代（中文）", "")).strip()
     name_text = str(row.get("单位名称（中文）", "")).strip()
 
-    # 1. 保护级别（35%）
+    # 1. 保护级别（40%）：批次越早分越高
     protection_score = 60
-    if any(keyword in batch_text for keyword in ["第一批", "第八批"]):
-        protection_score = 100
-    elif any(keyword in batch_text for keyword in ["第二批", "第七批"]):
-        protection_score = 85
-    elif any(keyword in batch_text for keyword in ["第三批", "第六批"]):
-        protection_score = 70
-    elif any(keyword in batch_text for keyword in ["第四批", "第五批"]):
-        protection_score = 60
+    batch_number = _extract_batch_number(batch_text)
+    if batch_number is not None:
+        protection_score = max(60, 100 - (batch_number - 1) * 5)
 
-    # 2. 年代久远度（30%）
+    # 2. 年代久远度（35%）
     era_score = 40
     if any(keyword in era_text for keyword in ["唐", "隋", "汉", "晋", "南北朝", "北朝", "南朝", "三国", "秦"]):
         era_score = 100
@@ -368,26 +408,41 @@ def calculate_building_dimensions(row: pd.Series) -> dict[str, float]:
     elif "清" in era_text:
         era_score = 40
 
-    # 3. 建筑稀有性（20%）
-    rarity_score = 50
-    if any(keyword in name_text for keyword in ["宫", "殿", "桥", "梁"]):
-        rarity_score = 100
-    elif any(keyword in name_text for keyword in ["衙", "署", "府", "官"]):
-        rarity_score = 85
-    elif any(keyword in name_text for keyword in ["宅", "院", "楼", "居", "庄", "第"]):
-        rarity_score = 70
-
-    # 4. 历史价值（15%）
-    historical_score = 100 if any(
-        keyword in name_text for keyword in ["第一", "最早", "唯一", "标志性", "最大", "最古"]
-    ) else 60
+    # 3. 建筑稀有性（25%）：按类别频次反推
+    rarity_score = row.get("建筑稀有性分", np.nan)
+    if pd.isna(rarity_score):
+        category = classify_building_category(name_text)
+        if rarity_score_map and category in rarity_score_map:
+            rarity_score = rarity_score_map[category]
+        else:
+            rarity_score = 70
 
     return {
         "保护级别": float(protection_score),
         "年代久远度": float(era_score),
         "建筑稀有性": float(rarity_score),
-        "历史价值": float(historical_score),
     }
+
+
+def apply_scoring_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """批量补充评分相关列，确保稀有性按同一批数据频次计算。"""
+    work_df = df.copy()
+    if work_df.empty:
+        return work_df
+
+    rarity_map = build_rarity_score_map(work_df)
+    if "单位名称（中文）" in work_df.columns:
+        category_series = work_df["单位名称（中文）"].fillna("").astype(str).apply(classify_building_category)
+        work_df["建筑稀有性分"] = category_series.map(rarity_map).fillna(70.0)
+    else:
+        work_df["建筑稀有性分"] = 70.0
+
+    work_df["综合评分"] = work_df.apply(
+        lambda r: calculate_building_score(r, rarity_score_map=rarity_map),
+        axis=1,
+    )
+    work_df["星级"] = work_df["综合评分"].apply(get_star_rating)
+    return work_df
 
 
 def get_star_rating(score: float) -> str:
@@ -404,7 +459,7 @@ def get_star_rating(score: float) -> str:
 
 
 def create_building_radar_chart(building_name: str, dimensions: dict[str, float]) -> go.Figure:
-    """创建单体古建筑四维评分雷达图。"""
+    """创建单体古建筑三维评分雷达图。"""
     labels = list(dimensions.keys())
     values = list(dimensions.values())
     # 闭合雷达图
@@ -424,7 +479,7 @@ def create_building_radar_chart(building_name: str, dimensions: dict[str, float]
         )
     )
     fig.update_layout(
-        title=dict(text=f"{building_name} · 四维价值雷达", y=0.98, yanchor="top"),
+        title=dict(text=f"{building_name} · 三维价值雷达", y=0.98, yanchor="top"),
         showlegend=False,
         height=400,
         margin=dict(l=32, r=32, t=56, b=72),
@@ -503,7 +558,7 @@ def build_building_ai_commentary(row: pd.Series, score: float, stars: str) -> st
         f"**{name}**坐落于**{region}**，文献与登记信息所示时代为**{era}**，在类型上归入**{category}**。"
         f"结合政区语境，可将该遗存置于地方社会史与匠作传统中理解；若需深入，可比对同省同类文保单位的形制与题记材料。  \n"
         "补充一则与此类遗存相关的历史故事：不少古建筑往往与地方名人行旅、科举乡约或城防水利等记忆相连；若无确证史料，可将其作为“地方传说/口述传统”点到为止。  \n"
-        f"本应用内综合评分为 **{score} 分（{stars}）**，四维为 {dim_desc}，供观展时快速把握价值侧重。  \n"
+        f"本应用内综合评分为 **{score} 分（{stars}）**，三维为 {dim_desc}，供观展时快速把握价值侧重。  \n"
         "## 形制特征与遗产价值  \n"
         f"从空间与功能角度看，该类建筑常见院落组织、木结构体系与装饰意匠等要素，反映礼制、居住或公共活动的不同需求。"
         f"评分上**{best_dim}**最为突出，宜作为讲解主线；**{weak_dim}**相对较低，解说中可提示观众结合实地勘察或档案再行印证。  \n"
@@ -565,7 +620,7 @@ def generate_ai_commentary_with_deepseek(
         "\n\n【各段要点】\n"
         "1) 历史脉络：时代、政区地缘、在区域建筑谱系或类型学中的大致位置；信息不足时用「一般认为」「尚需档案印证」等谨慎表述。\n"
         "补充要求：在第一段或第二段中穿插 1 句“历史故事/轶事/地方传说”，用于增强可读性；若缺乏确证史料，必须使用「相传/民间传说/口述传统」等表述并避免具体到人物姓名与精确年份。\n"
-        "2) 形制与价值：紧扣「类别」与给定「四维」及最强/最弱维度，点到空间组织、结构或装饰意匠的代表性；勿虚构具体营造年代、匠师名或未经核实的轶事。\n"
+        "2) 形制与价值：紧扣「类别」与给定「三维」及最强/最弱维度，点到空间组织、结构或装饰意匠的代表性；勿虚构具体营造年代、匠师名或未经核实的轶事。\n"
         "3) 保护与传承：结合保护批次与建筑类型，从修缮原则（最小干预、可逆、可识别）、日常监测、防火防潮防虫、档案与数字化、合理展示利用等中选 2–4 条展开为可操作建议；勿编造真实不存在的修缮工程名称或批文号。\n"
         "4) 参观导览：面向访客，写行前准备（开放信息、预约、交通大类提示）、参观礼仪、摄影与文物保护边界、天气/季节与安全提示；无具体开放时间时写普适建议。\n"
     )
@@ -577,7 +632,7 @@ def generate_ai_commentary_with_deepseek(
         f"- 建筑类别（应用内分类）：{category}\n"
         f"- 保护批次：{batch}\n"
         f"- 综合评分：{score:.1f}（{stars}）\n"
-        f"- 四维评分：{dim_desc}\n"
+        f"- 三维评分：{dim_desc}\n"
         f"- 最强维度：{best_dim}\n"
         f"- 相对薄弱维度：{weak_dim}\n\n"
         "严格按系统提示的四段标题与字数要求输出，不要输出开场白或结语套话。"
@@ -869,8 +924,7 @@ def show_building_detail_dialog(row_data: dict[str, object]) -> None:
     cand["__match_score"] = cand["__match_era"] + cand["__match_cat"] + cand["__match_prov"]
 
     # 中文注释：复用评分函数计算综合评分与星级（若已存在则覆盖为一致口径）
-    cand["综合评分"] = cand.apply(calculate_building_score, axis=1)
-    cand["星级"] = cand["综合评分"].apply(get_star_rating)
+    cand = apply_scoring_columns(cand)
 
     # 多维匹配：按匹配度 + 综合评分排序
     rule_rec_df = (
@@ -2071,9 +2125,8 @@ def build_scored_ranking_table(df: pd.DataFrame, top_n: int = 20, include_region
             return pd.DataFrame(columns=["排名", "建筑名称", "朝代", "年代", "市/区", "综合评分", "星级"])
         return pd.DataFrame(columns=["排名", "建筑名称", "朝代", "年代", "省份", "保护批次", "综合评分", "星级"])
 
-    ranking_df["综合评分"] = ranking_df.apply(calculate_building_score, axis=1)
+    ranking_df = apply_scoring_columns(ranking_df)
     ranking_df["朝代"] = ranking_df["时代（中文）"].apply(get_era_label) if "时代（中文）" in ranking_df.columns else "其他"
-    ranking_df["星级"] = ranking_df["综合评分"].apply(get_star_rating)
     ranking_df = ranking_df.sort_values(by="综合评分", ascending=False).head(top_n).reset_index(drop=True)
     ranking_df.insert(0, "排名", range(1, len(ranking_df) + 1))
 
@@ -2116,9 +2169,7 @@ def build_full_scored_ranking(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["排名", "建筑名称", "朝代", "省份", "星级", "综合评分"])
 
-    ranking_df = df.copy()
-    ranking_df["综合评分"] = ranking_df.apply(calculate_building_score, axis=1)
-    ranking_df["星级"] = ranking_df["综合评分"].apply(get_star_rating)
+    ranking_df = apply_scoring_columns(df)
     ranking_df["朝代"] = ranking_df["时代（中文）"].apply(get_era_label) if "时代（中文）" in ranking_df.columns else "其他"
     ranking_df = ranking_df.sort_values(by="综合评分", ascending=False).reset_index(drop=True)
     ranking_df.insert(0, "排名", range(1, len(ranking_df) + 1))
@@ -2184,8 +2235,6 @@ def build_rule_based_card_hint(row: pd.Series) -> str:
         return "始建于唐宋，历史悠久"
     if dims.get("建筑稀有性", 0) >= 85:
         return "建筑类型罕见，研究价值高"
-    if dims.get("历史价值", 0) >= 85:
-        return "见证重要历史事件"
     return "年代久远，保护级别高"
 
 
@@ -2462,7 +2511,7 @@ def render_treasure_detail_page(df: pd.DataFrame) -> None:
                 ">总榜</span>全国古建筑综合评分排行榜
             </div>
             <div style="font-size:14px; color:#4A3728; margin-top:6px;">
-                基于保护级别、年代久远、稀有性、历史价值的综合评估
+                基于保护级别、年代久远、稀有性的综合评估
             </div>
         </div>
         """,
@@ -3010,8 +3059,7 @@ def render_map_view(filtered_df: pd.DataFrame, selected_province: str) -> None:
             # 为地图探索详情补充打分列，便于卡片选择 + 雷达图 + 解说联动
             card_df = province_df.copy()
             if not card_df.empty:
-                card_df["综合评分"] = card_df.apply(calculate_building_score, axis=1)
-                card_df["星级"] = card_df["综合评分"].apply(get_star_rating)
+                card_df = apply_scoring_columns(card_df)
                 card_df = card_df.sort_values(by="综合评分", ascending=False).reset_index(drop=True)
 
             if card_df.empty:
