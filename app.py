@@ -288,19 +288,20 @@ def load_app_data() -> pd.DataFrame:
 
 
 def get_main_era(df: pd.DataFrame) -> str:
-    """计算主要朝代（出现次数最多）。"""
+    """计算主要朝代（排除“其他”后出现次数最多）。"""
     era_col = "时代（中文）"
     if era_col not in df.columns or df.empty:
         return "-"
 
-    era_keywords = ["唐", "宋", "元", "明", "清"]
-    counts: dict[str, int] = {}
-    era_series = df[era_col].fillna("").astype(str)
-    for era in era_keywords:
-        counts[era] = int(era_series.str.contains(era, regex=False, na=False).sum())
+    era_series = df[era_col].fillna("").astype(str).apply(get_era_label)
+    era_series = era_series[era_series != "其他"]
+    if era_series.empty:
+        return "-"
 
-    major_era = max(counts, key=counts.get) if counts else "-"
-    return major_era if counts.get(major_era, 0) > 0 else "-"
+    counts = era_series.value_counts()
+    top_era = str(counts.index[0])
+    top_count = int(counts.iloc[0])
+    return f"{top_era}（{top_count}处）"
 
 
 def get_main_category(df: pd.DataFrame) -> str:
@@ -2511,7 +2512,7 @@ def render_treasure_detail_page(df: pd.DataFrame) -> None:
                 ">总榜</span>全国古建筑综合评分排行榜
             </div>
             <div style="font-size:14px; color:#4A3728; margin-top:6px;">
-                基于保护级别、年代久远、稀有性的综合评估
+                基于三维加权模型：保护级别 + 年代久远度 + 建筑稀有性
             </div>
         </div>
         """,
